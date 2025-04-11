@@ -1,0 +1,32 @@
+# OS generated files
+.DS_Store
+
+# IDE config
+.vscode/
+.idea/
+.cursor/
+
+# Environment
+.env
+.venv
+
+# Build artifacts
+.next/
+out/
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Solidity / Hardhat / Foundry
+cache/
+artifacts/
+typechain-types/
+coverage/
+coverage.json
+
+# Foundry
+lib/ 
