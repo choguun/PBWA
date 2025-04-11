@@ -4,4 +4,22 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "chainlit>=2.4.400",
+    "dotenv>=0.9.9",
+    "fastapi>=0.115.12",
+    "goat-sdk>=0.1.6",
+    "goat-sdk-adapter-langchain>=0.1.1",
+    "goat-sdk-plugin-erc20>=0.1.2",
+    "goat-sdk-wallet-evm>=0.1.2",
+    "goat-sdk-wallet-web3>=0.1.5",
+    "langchain>=0.3.23",
+    "langchain-community>=0.3.21",
+    "langchain-core>=0.3.51",
+    "langchain-google-vertexai>=2.0.19",
+    "langgraph>=0.3.28",
+    "pydantic>=2.11.3",
+    "requests>=2.32.3",
+    "uvicorn[standard]>=0.34.0",
+    "vertexai>=1.43.0",
+]
