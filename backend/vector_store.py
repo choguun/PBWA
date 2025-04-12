@@ -7,18 +7,17 @@ logger = logging.getLogger(__name__)
 
 def get_embedding_model():
     """Initializes and returns the FastEmbed embedding model."""
-    # You can customize the model name if needed, e.g., "BAAI/bge-small-en-v1.5"
-    # See FastEmbed documentation for available models.
-    logger.info("Initializing embedding model...")
+    model_name = "sentence-transformers/all-MiniLM-L6-v2"
+    logger.info(f"Initializing embedding model: {model_name}...")
     try:
-        # Using DefaultEmbedding provides a reasonable default
-        embedding_model = DefaultEmbedding()
+        # Instantiate DefaultEmbedding with the specified model name
+        embedding_model = DefaultEmbedding(model_name=model_name)
         # Attempt a dummy embed to check initialization
         _ = list(embedding_model.embed("test"))
-        logger.info(f"Embedding model initialized successfully: {type(embedding_model).__name__}")
+        logger.info(f"Embedding model initialized successfully: {model_name} ({type(embedding_model).__name__})")
         return embedding_model
     except Exception as e:
-        logger.error(f"Failed to initialize embedding model: {e}", exc_info=True)
+        logger.error(f"Failed to initialize embedding model {model_name}: {e}", exc_info=True)
         raise
 
 def get_qdrant_client():

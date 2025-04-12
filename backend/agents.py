@@ -379,35 +379,40 @@ class ResearchPipeline:
             return {"processed_data": {"vector": [], "timeseries": []}}
             
         for i, (task, data) in enumerate(collected_data):
+            doc_to_embed = None # Prepare potential doc for embedding
+            metadata = { 
+                "source_task": task,
+                "collection_step": i 
+            }
+            
             # --- Process for Vector Store (Textual Data) ---
-            if isinstance(data, str) and not data.startswith("Error:"):
-                # Simple processing: treat strings as documents
-                doc = {
-                    "page_content": data, 
-                    "metadata": { 
-                        "source_task": task,
-                        "collection_step": i 
-                        # TODO: Add more metadata (URL, tool name, timestamp)
-                    }
-                }
-                processed_for_vector.append(doc)
-            elif isinstance(data, dict) and 'error' not in data:
-                # If data is a dict (e.g., from API tools) and not an error, 
-                # maybe store its JSON string in vector store or just process for timeseries.
-                # For now, let's store a summary/JSON string.
-                doc_content = json.dumps(data, indent=2, default=str)[:4000] # Limit length
-                doc = {
-                    "page_content": f"Data from task: {task}\n{doc_content}",
-                    "metadata": {
-                        "source_task": task,
-                        "collection_step": i,
-                        "data_type": "api_result"
-                    }
-                }
-                processed_for_vector.append(doc)
+            if isinstance(data, str):
+                # Embed raw strings directly (if not empty)
+                if data.strip():
+                    doc_to_embed = {"page_content": data, "metadata": {**metadata, "data_type": "text"}}
+            elif isinstance(data, list) and len(data) > 0:
+                 # If data is a list (e.g., from vfat scraper or twitter), create a summary
+                 # For now, just indicate the type and number of items
+                 summary = f"List data from task '{task}': Contains {len(data)} items. First item type: {type(data[0]).__name__}"
+                 doc_to_embed = {"page_content": summary, "metadata": {**metadata, "data_type": "list_summary"}}
+            elif isinstance(data, dict):
+                if 'error' in data:
+                    # Skip embedding errors
+                    logger.debug(f"Skipping embedding for error data from task '{task}'")
+                else:
+                    # Create a more concise summary of dictionary data
+                    # Example: "API result for task 'Use coingecko_api_tool ...' with keys: ['id', 'symbol', 'market_data']"
+                    summary = f"API result for task '{task}'. Keys: {list(data.keys())}"
+                    # Optionally add a snippet of important values if identifiable
+                    # if 'name' in data: summary += f" Name: {data['name']}"
+                    # if 'symbol' in data: summary += f" Symbol: {data['symbol']}" 
+                    doc_to_embed = {"page_content": summary, "metadata": {**metadata, "data_type": "api_summary"}}
             else:
-                # Handle errors or unexpected types for vector store
-                logger.warning(f"Skipping vector processing for data from task '{task}' due to type/error: {type(data)}")
+                # Handle other unexpected types if necessary
+                logger.warning(f"Skipping vector processing for data from task '{task}' due to unexpected type: {type(data)}")
+
+            if doc_to_embed:
+                processed_for_vector.append(doc_to_embed)
 
             # --- Process for Time Series Store --- 
             # Example: Extracting TVL from DefiLlama result
@@ -482,8 +487,8 @@ class ResearchPipeline:
                     if points_added > 0:
                          logger.info(f"Processed market data point for '{token_id}' from CoinGecko.")
 
-        logger.info(f"Processed {len(processed_for_vector)} documents for vector store.")
-        logger.info(f"Processed {len(processed_for_timeseries)} points for time-series store.")
+        logger.info(f"Prepared {len(processed_for_vector)} documents for vector store embedding.")
+        logger.info(f"Prepared {len(processed_for_timeseries)} points for time-series store.")
         return {"processed_data": {"vector": processed_for_vector, "timeseries": processed_for_timeseries}}
         
     async def _update_vector_store_node(self, state: PipelineState):
@@ -986,17 +991,6 @@ class ResearchPipeline:
 
                 logger.debug(f"Processing update for Node: {node_name}, Output Keys: {list(node_output.keys())}")
                 current_state_id = config["configurable"]["thread_id"]
-
-                # --- Check for Errors in Node Output --- 
-                # Errors from nodes should be in the returned dict
-                if node_output.get("error_log") and isinstance(node_output["error_log"], list) and len(node_output["error_log"]) > 0:
-                    # Check if this node *added* the error
-                    # Simple check: Assume if error_log is present, it's the relevant error
-                    last_error = node_output["error_log"][-1]
-                    logger.error(f"Error detected in output from node '{node_name}': {last_error}")
-                    error_data = {"type": "error", "message": f"Error in node '{node_name}': {last_error}"}
-                    yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
-                    break # Stop streaming on first detected error
 
                 # --- Map node outputs to SSE events --- 
                 sse_data = {} 
