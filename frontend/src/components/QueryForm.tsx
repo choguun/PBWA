@@ -51,7 +51,7 @@ const QueryForm: React.FC<QueryFormProps> = ({ onSubmitQuery, isLoading }) => {
           onChange={(e) => setQuery(e.target.value)}
           placeholder="e.g., Analyze the latest developments in liquid restaking tokens (LRTs) and propose potential strategies..."
           rows={4}
-          className="w-full p-2 border border-gray-300 rounded shadow-sm focus:ring-indigo-500 focus:border-indigo-500 disabled:bg-gray-100"
+          className="text-black w-full p-2 border border-gray-300 rounded shadow-sm focus:ring-indigo-500 focus:border-indigo-500 disabled:bg-gray-100"
           disabled={isLoading}
         />
       </div>
@@ -69,7 +69,7 @@ const QueryForm: React.FC<QueryFormProps> = ({ onSubmitQuery, isLoading }) => {
                     name="risk_tolerance"
                     value={profile.risk_tolerance}
                     onChange={handleProfileChange}
-                    className="w-full p-2 border border-gray-300 rounded shadow-sm focus:ring-indigo-500 focus:border-indigo-500 disabled:bg-gray-100 bg-white"
+                    className="text-black w-full p-2 border border-gray-300 rounded shadow-sm focus:ring-indigo-500 focus:border-indigo-500 disabled:bg-gray-100 bg-white"
                     disabled={isLoading}
                 >
                     <option value="">Select...</option>
@@ -89,7 +89,7 @@ const QueryForm: React.FC<QueryFormProps> = ({ onSubmitQuery, isLoading }) => {
                     value={profile.preferred_chains}
                     onChange={handleProfileChange}
                     placeholder="e.g., Ethereum, Arbitrum, Solana"
-                    className="w-full p-2 border border-gray-300 rounded shadow-sm focus:ring-indigo-500 focus:border-indigo-500 disabled:bg-gray-100"
+                    className="text-black w-full p-2 border border-gray-300 rounded shadow-sm focus:ring-indigo-500 focus:border-indigo-500 disabled:bg-gray-100"
                     disabled={isLoading}
                 />
             </div>

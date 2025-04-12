@@ -62,73 +62,88 @@ export function useResearchAgent(): UseResearchAgentReturn {
     const decoder = new TextDecoder();
     let buffer = '';
     let eventType = 'message'; // Keep track of event type outside loop
+    let eventCount = 0; // DEBUG: Count events
 
     // Assign cancellation ability to the ref
     readerRef.current = { cancel: () => reader.cancel() };
 
+    console.log(`[${currentStatus}] processStream: Starting loop...`);
     while (true) {
       try {
+        console.log(`[${currentStatus}] processStream: Waiting for reader.read()...`);
         const { done, value } = await reader.read();
+        console.log(`[${currentStatus}] processStream: reader.read() returned - done: ${done}`);
 
         if (done) {
-          console.log(`Stream finished by reader (${currentStatus}).`);
+          console.log(`[${currentStatus}] processStream: Stream finished by reader.`);
           setStatus(prevStatus => {
-            // Only transition to finished if not paused or errored
             if (prevStatus !== 'paused' && prevStatus !== 'error') {
               return 'finished';
             }
             return prevStatus;
           });
-           readerRef.current = null; // Clear ref on natural completion
+          readerRef.current = null;
           break;
         }
 
-        buffer += decoder.decode(value, { stream: true });
+        const decodedChunk = decoder.decode(value, { stream: true });
+        console.log(`[${currentStatus}] processStream: Decoded chunk:`, decodedChunk);
+        buffer += decodedChunk;
+        console.log(`[${currentStatus}] processStream: Buffer before split: "${buffer}"`);
         const messageBlocks = buffer.split('\n\n');
+        console.log(`[${currentStatus}] processStream: Split into ${messageBlocks.length} blocks.`);
         buffer = messageBlocks.pop() || ''; // Keep partial message
+        console.log(`[${currentStatus}] processStream: Buffer after split: "${buffer}"`);
 
         let shouldBreakLoop = false;
-        messageBlocks.forEach(block => {
+        messageBlocks.forEach((block, blockIndex) => {
           if (shouldBreakLoop || !block.trim()) return;
-          console.log(`Raw Block (${currentStatus}):`, block);
+          eventCount++;
+          console.log(`[${currentStatus}] processStream: Processing Block ${blockIndex + 1} (Event ${eventCount}):`, block);
+          let currentBlockEventType = 'message'; // Reset for each block
           let eventData = '';
           block.split('\n').forEach(line => {
             if (line.startsWith('event:')) {
-              eventType = line.substring(6).trim();
+              currentBlockEventType = line.substring(6).trim();
+              eventType = currentBlockEventType; // Update outer scope for break message
             } else if (line.startsWith('data:')) {
               eventData = line.substring(5).trim();
             }
           });
+          console.log(`[${currentStatus}] processStream: Parsed - Type: ${currentBlockEventType}, Data: "${eventData}"`);
 
           if (eventData) {
             try {
               const parsedData = JSON.parse(eventData);
-              const logEntry: LogEntry = { eventType, data: parsedData };
+              const logEntry: LogEntry = { eventType: currentBlockEventType, data: parsedData };
+              console.log(`[${currentStatus}] processStream: Calling setStreamLog for Event ${eventCount}...`);
               setStreamLog(prev => [...prev, logEntry]);
+              console.log(`[${currentStatus}] processStream: setStreamLog finished for Event ${eventCount}.`);
 
-              if (eventType === 'strategy') {
+              if (currentBlockEventType === 'strategy') {
                 const proposals = (parsedData as StrategyEventData).proposals;
                 setCurrentProposals(Array.isArray(proposals) ? proposals : (typeof proposals === 'string' ? proposals.split('\n').filter(p => p.trim() !== '') : []));
               }
-              if (eventType === 'feedback') {
+              if (currentBlockEventType === 'feedback') {
+                console.log(`[${currentStatus}] processStream: FEEDBACK event detected.`);
                 setStateId((parsedData as FeedbackEventData).state_id);
                 setStatus('paused');
                 shouldBreakLoop = true;
               }
-              if (eventType === 'end') {
+              if (currentBlockEventType === 'end') {
+                console.log(`[${currentStatus}] processStream: END event detected.`);
                 setStatus('finished');
                 shouldBreakLoop = true;
               }
             } catch (e) {
-              console.error(`Failed to parse message data (${currentStatus}):`, eventData, e);
+              console.error(`[${currentStatus}] processStream: Failed to parse message data:`, eventData, e);
               setStreamLog(prev => [...prev, { eventType: 'parse_error', data: { message: `Invalid JSON: ${eventData}` } }]);
             }
           }
-        });
+        }); // End forEach block
 
         if (shouldBreakLoop) {
-          console.log(`Breaking stream loop (${currentStatus}) due to event: ${eventType}`);
-          // Cancel reader AFTER processing the block that caused the break
+          console.log(`[${currentStatus}] processStream: Breaking stream loop due to event: ${eventType}`);
           if (readerRef.current) {
             readerRef.current.cancel().catch(e => console.warn("Error cancelling reader on break:", e));
             readerRef.current = null;
@@ -136,19 +151,19 @@ export function useResearchAgent(): UseResearchAgentReturn {
           break;
         }
       } catch (error: any) {
-         // Handle errors during reader.read() - includes cancellation
+         console.error(`[${currentStatus}] processStream: Error during reader.read() or processing:`, error);
          if (error.name === 'AbortError' || (error instanceof DOMException && error.message.includes('aborted'))) {
-           console.log(`Stream reading aborted expectedly (${currentStatus}).`);
+           console.log(`[${currentStatus}] processStream: Stream reading aborted expectedly.`);
          } else {
-           console.error(`Stream processing error (${currentStatus}):`, error);
            setErrorMessage(error.message || 'Stream processing failed');
            setStatus('error');
          }
-         readerRef.current = null; // Clear ref on error/abort
-         break; // Exit loop on error
+         readerRef.current = null;
+         break;
        }
-    }
-  }, []); // No dependencies needed if using passed-in status
+    } // End while(true)
+    console.log(`[${currentStatus}] processStream: Exited loop.`);
+  }, []); // No dependencies needed
 
   // Handler for submitting the initial query
   const handleInvokeQuery = useCallback(async (query: string, profile: UserProfileData) => {

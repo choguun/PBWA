@@ -77,7 +77,8 @@ export default function Home() {
           </div>
         )}
 
-        {(status === 'running' || status === 'resuming' || status === 'paused' || status === 'finished') && streamLog.length > 0 && (
+        {/* Stream Display: Render whenever agent is active or finished */} 
+        {(status === 'running' || status === 'resuming' || status === 'paused' || status === 'finished') && (
           <StreamDisplay streamLog={streamLog} />
         )}
 
