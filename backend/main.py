@@ -1,6 +1,8 @@
 import os
 from dotenv import load_dotenv
 import logging # Import logging
+from fastapi.responses import StreamingResponse # Import StreamingResponse
+import json # Import json
 
 # --- Logging Configuration ---
 log_file = "agent_log.txt" # Log file in the project root (PBWA/)
@@ -30,15 +32,25 @@ logger.info("Instantiating MultiStepAgent...")
 agent = MultiStepAgent()
 logger.info("MultiStepAgent instantiated.")
 
-@app.post("/invoke", response_model=QueryResponse)
-async def invoke_agent(request: QueryRequest):
-    """Receives a user query and returns the agent's response."""
-    logger.info(f"Received request for query: {request.query}")
-    agent_response = await agent.arun(request.query)
-    logger.info(f"Agent returned response for query '{request.query}'")
-    return {"response": agent_response}
+@app.post("/invoke") # Remove response_model, it's handled by streaming
+async def invoke_agent_stream(request: QueryRequest):
+    """Receives a user query and streams back agent progress via SSE."""
+    logger.info(f"Received streaming request for query: {request.query}")
+    
+    async def event_generator():
+        try:
+            async for sse_event_str in agent.astream_events(request.query):
+                yield sse_event_str
+        except Exception as e:
+            # Log the error during streaming generation
+            logger.error(f"Error generating stream for query '{request.query}': {e}", exc_info=True)
+            # Yield a final error event to the client
+            error_data = {"type": "error", "message": f"Stream generation failed: {e}"}
+            yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
+            yield f"event: end\ndata: {json.dumps({'message': 'Stream ended due to error.'})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/")
 async def read_root():
-    # Keep the root endpoint for basic checks if needed
-    return {"message": "Multi-Step Agent API is running."}
+    return {"message": "Planning Agent API is running. Use POST /invoke for streaming."}
