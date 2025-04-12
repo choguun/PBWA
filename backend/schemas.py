@@ -53,3 +53,16 @@ class Plan(BaseModel):
 class ReplannerOutput(BaseModel):
     replan: bool = Field(..., description="Indicates if replanning is necessary.")
     new_plan: Optional[List[str]] = Field(None, description="The revised plan steps, if replanning occurred.")
+
+# --- New Tool Schemas ---
+class DefiLlamaInput(BaseModel):
+    protocol_slug: str = Field(description="The protocol slug (e.g., 'aave', 'uniswap') as used by DefiLlama.")
+    metric: Optional[str] = Field(None, description="Optional specific metric to fetch (e.g., 'tvl', 'volume'). If None, fetches general protocol data.")
+
+class CoinGeckoInput(BaseModel):
+    token_id: Optional[str] = Field(None, description="The CoinGecko token ID (e.g., 'bitcoin', 'ethereum', 'aave'). Use this OR contract_address.")
+    contract_address: Optional[str] = Field(None, description="The token contract address.")
+    asset_platform_id: Optional[str] = Field(None, description="The CoinGecko asset platform ID (e.g., 'ethereum', 'polygon-pos') required if using contract_address.")
+    include_market_data: bool = Field(True, description="Whether to include market data (price, market cap, volume) when fetching full coin data.")
+
+    # Add validation later if needed to ensure either token_id OR (contract_address + asset_platform_id) is provided
