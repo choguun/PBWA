@@ -199,8 +199,10 @@ class ResearchPipeline:
         remaining_plan = plan[1:]
         logger.info(f"Executing plan step: {current_task}")
 
-        tool_output = "Error: Tool execution failed internally."
-        tool_name = "Unknown"
+        tool_output: Any = None # Initialize tool_output
+        tool_error = False # Flag to indicate if an error occurred
+        error_details = "" # Store specific error message
+        
         try:
             # --- Refactored Tool ID, Arg Parsing & Validation --- 
             parts = current_task.split()
@@ -210,16 +212,16 @@ class ResearchPipeline:
             if not found_tool:
                  error_msg = f"Tool '{potential_tool_name}' not found for task: {current_task}. Available: {list(self.tool_map.keys())}"
                  logger.error(error_msg)
-                 tool_output = f"Error: {error_msg}"
                  errors.append(error_msg)
+                 tool_error = True
+                 error_details = error_msg
             else:
                 tool_name = found_tool.name
                 logger.info(f"Identified tool: {tool_name}. Preparing args and validation.")
                 
-                validated_args_dict = {} # Arguments to pass to the tool function
+                validated_args_dict = {} 
                 can_execute = True
 
-                # Check if the tool expects arguments via args_schema
                 if hasattr(found_tool, 'args_schema') and found_tool.args_schema:
                     schema = found_tool.args_schema
                     schema_fields = schema.__fields__.keys()
@@ -244,17 +246,17 @@ class ResearchPipeline:
 
                     logger.debug(f"Raw args extracted for validation: {raw_args}")
                     
-                    # Validate using Pydantic
                     try:
                         validated_model = schema(**raw_args)
-                        validated_args_dict = validated_model.dict() # Use validated, typed args
+                        validated_args_dict = validated_model.dict()
                         logger.info(f"Arguments validated successfully for '{tool_name}': {validated_args_dict}")
-                    except Exception as validation_err: # Catches Pydantic validation errors
+                    except Exception as validation_err: 
                         error_msg = f"Argument validation failed for tool '{tool_name}'. Task: '{current_task}'. Extracted raw args: {raw_args}. Error: {validation_err}"
                         logger.error(error_msg)
-                        tool_output = f"Error: {error_msg}"
                         errors.append(error_msg)
-                        can_execute = False # Prevent calling tool
+                        can_execute = False
+                        tool_error = True
+                        error_details = f"Argument validation failed: {validation_err}"
                 else:
                     # Tool expects no arguments
                     logger.info(f"Tool '{tool_name}' does not have an args_schema. Assuming no arguments.")
@@ -263,28 +265,44 @@ class ResearchPipeline:
 
                 # Execute the tool if possible
                 if can_execute:
-                    func = found_tool.func
-                    if inspect.iscoroutinefunction(func):
-                        tool_output = await func(**validated_args_dict)
-                    else:
-                        tool_output = func(**validated_args_dict)
-                    logger.info(f"Direct Tool Call Output received for '{tool_name}'.")
-                    logger.debug(f"Tool output snippet: {str(tool_output)[:200]}...")
+                    try:
+                        func = found_tool.func
+                        if inspect.iscoroutinefunction(func):
+                            tool_output = await func(**validated_args_dict)
+                        else:
+                            tool_output = func(**validated_args_dict)
+                        logger.info(f"Direct Tool Call Output received for '{tool_name}'.")
+                        logger.debug(f"Tool output snippet: {str(tool_output)[:200]}...")
+                    except Exception as exec_err:
+                        error_msg = f"Error executing tool '{tool_name}' for task '{current_task}': {exec_err}"
+                        logger.error(error_msg, exc_info=True)
+                        errors.append(error_msg)
+                        tool_error = True
+                        error_details = f"Tool execution failed: {exec_err}"
+                # else: Tool was not executed due to validation failure - error already flagged
 
         except Exception as e:
-            error_msg = f"Unexpected error during tool execution for task '{current_task}': {e}"
+            # Catch broader errors during identification/parsing phase
+            error_msg = f"Unexpected error during tool processing for task '{current_task}': {e}"
             logger.error(error_msg, exc_info=True)
-            tool_output = f"Error executing task: {e}"
             errors.append(error_msg)
+            tool_error = True
+            error_details = f"Unexpected error: {e}"
             
-        # Update state
-        newly_collected = (current_task, tool_output)
+        # --- Update State --- 
+        # If an error occurred, store structured error, otherwise store tool output
+        if tool_error:
+            step_result = {"error": error_details} 
+        else:
+            step_result = tool_output
+            
+        newly_collected = (current_task, step_result)
         updated_collected_data = collected + [newly_collected]
-
+        
         return {
             "research_plan": remaining_plan, 
             "collected_data": updated_collected_data,
-            "current_step_output": tool_output,
+            "current_step_output": step_result, # Pass the actual result (or error dict) 
             "error_log": errors
         }
 
