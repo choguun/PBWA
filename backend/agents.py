@@ -14,6 +14,7 @@ import inspect
 # Qdrant specific imports
 from qdrant_client import models # Import Qdrant models for search
 from datetime import datetime # For timestamping time-series data
+from langgraph.checkpoint.memory import MemorySaver # Import MemorySaver
 
 from .config import GOOGLE_API_KEY, LLM_MODEL, QDRANT_COLLECTION_NAME
 from .tools import agent_tools
@@ -104,6 +105,7 @@ class ResearchPipeline:
         self.workflow.add_node("update_timeseries_db", self._timeseries_db_update_node)
         self.workflow.add_node("analyze_data", self._analyze_data_step)
         self.workflow.add_node("propose_strategy", self._propose_strategy_step)
+        self.workflow.add_node("refine_strategy", self._refine_strategy_step)
 
         # --- Edges --- 
         self.workflow.set_entry_point("load_user_profile")
@@ -131,11 +133,17 @@ class ResearchPipeline:
                 "replan": "replan_step"
             }
         )
-        self.workflow.add_edge("propose_strategy", END) 
+        self.workflow.add_edge("propose_strategy", "refine_strategy")
+        self.workflow.add_edge("refine_strategy", END) 
         
-        # Compile the graph
-        self.app = self.workflow.compile()
-        logger.info("ResearchPipeline graph compiled.")
+        # --- Checkpointer for state persistence --- 
+        self.memory = MemorySaver() # Instantiate the checkpointer
+
+        # Compile the workflow
+        logger.info("Compiling the LangGraph workflow...")
+        # Interrupt after proposing strategy to allow for feedback
+        self.app = self.workflow.compile(checkpointer=self.memory, interrupt_after=["propose_strategy"]) 
+        logger.info("Workflow compiled successfully.")
 
     # --- Helper: Load User Profile --- 
     def _load_profile(self, profile_id: str = "default_profile") -> Optional[Dict[str, Any]]:
@@ -811,9 +819,13 @@ class ResearchPipeline:
             errors.append(error_msg)
             strategy_proposals = f"Error generating strategies: {e}"
         
+        # Add signal for interruption
+        logger.info("Strategy proposals generated. Preparing to pause for feedback.")
+        # We don't modify the return structure here, the graph interruption handles the pause.
+        # The state containing strategy_proposals will be available when the stream pauses.
         return {
             "strategy_proposals": strategy_proposals,
-            "error_log": errors # Pass on any accumulated errors
+            "error_log": errors
         }
 
     # --- Updated Replan Node --- 
@@ -868,6 +880,27 @@ class ResearchPipeline:
             # For now, keep original plan and log error.
             return {"research_plan": plan, "error_log": errors + [error_msg]}
 
+    # --- Step: Refine Strategy (using feedback) --- 
+    def _refine_strategy_step(self, state: PipelineState) -> Dict[str, Any]:
+        """Refines the strategy based on user feedback (if provided)."""
+        logger.info("--- Entering Refine Strategy Step ---")
+        feedback = state.get("feedback")
+        proposals = state.get("strategy_proposals")
+
+        if feedback:
+            logger.info(f"Refining strategy based on feedback: {feedback}")
+            # TODO: Implement actual refinement logic using LLM
+            # For now, just log and keep original proposals
+            refined_proposals = proposals # Placeholder
+            logger.info(f"Original proposals: {proposals}")
+            logger.info(f"Refined proposals (placeholder): {refined_proposals}")
+            # Update state if refinement happens (even if placeholder for now)
+            return {"strategy_proposals": refined_proposals, "current_step_output": "Strategy refined based on feedback (placeholder)."}
+        else:
+            logger.info("No feedback provided, skipping refinement.")
+            # Return empty dict as state is unchanged
+            return {"current_step_output": "No feedback provided, strategy not refined."}
+
     # --- Streaming Method Update ---
     async def astream_events(self, user_query: str) -> AsyncGenerator[str, None]: 
         logger.info(f"--- Starting research pipeline stream for Query: {user_query} ---")
@@ -893,26 +926,38 @@ class ResearchPipeline:
     
         config = {"recursion_limit": 50}
         sse_event_type = "progress"
+        current_state_id = None # Track state ID for potential resume
         
         try:
-            async for event in self.app.astream(initial_state, config=config):
-                logger.debug(f"Workflow Event: {event}")
-                node_name = list(event.keys())[0]
-                node_output = event[node_name]
+            async for event in self.app.astream(initial_state, config=config, stream_mode="values"): # Use stream_mode='values'
+                logger.debug(f"Workflow Event/Value: {event}")
+                # stream_mode='values' yields the full state after each node
+                # We need to check which node was *last* executed to determine the event type
+                last_node = event["messages"][-1].name if event.get("messages") else None
+                current_state_id = event.get("checkpoint").ts if event.get("checkpoint") else None # Get state ID if available
                 
+                node_name = last_node
+                node_output = event["state"] # The full state is the "output" in values mode
+
                 sse_data = {} 
                 sse_event_type = None
+                is_interruption = False
                 
                 # --- Map node outputs to SSE events --- 
                 if node_name == "load_user_profile":
-                    # Optional: Add event for profile loading
-                    pass 
+                    pass # Maybe send profile loaded event?
                 elif node_name == "plan_research":
                     sse_event_type = "plan"
                     sse_data = {"type": "plan", "steps": node_output.get("research_plan", [])}
                 elif node_name == "collect_data":
-                     sse_event_type = "tool_result"
-                     sse_data = {"type": "tool_result", "result": node_output.get("current_step_output")}
+                    sse_event_type = "tool_result"
+                    sse_data = {"type": "tool_result", "result": node_output.get("current_step_output")}
+                elif node_name == "replan_step":
+                    sse_event_type = "replan"
+                    # Check if the *plan* in the state actually changed
+                    # This requires comparing to previous state or checking a flag if set by replan_step
+                    # Simplification: Assume replan_step always signals replan
+                    sse_data = {"type": "replan", "message": "Replanning...", "new_plan": node_output.get("research_plan")}
                 elif node_name == "process_data":
                     sse_event_type = "processing"
                     vector_count = len(node_output.get("processed_data", {}).get("vector", []))
@@ -920,53 +965,44 @@ class ResearchPipeline:
                     sse_data = {"type": "processing", "message": f"Processed {vector_count} vector docs, {ts_count} time-series points."}
                 elif node_name == "update_vector_store":
                     sse_event_type = "storage"
-                    sse_data = {"type": "storage", "message": node_output.get("current_step_output", "Storage update completed.")}
+                    sse_data = {"type": "storage", "message": node_output.get("current_step_output") or "Vector store updated."}
                 elif node_name == "update_timeseries_db":
                     sse_event_type = "storage_ts"
-                    sse_data = {"type": "storage_ts", "message": node_output.get("current_step_output", "Time-series update completed.")}
+                    sse_data = {"type": "storage_ts", "message": node_output.get("current_step_output") or "Time-series DB updated."}
                 elif node_name == "analyze_data":
                     sse_event_type = "analysis"
                     analysis_obj = node_output.get("analysis_results")
-                    # Send the full analysis object or just the text?
-                    # Sending text for primary display, maybe add sufficiency flag?
                     analysis_text = analysis_obj.analysis_text if analysis_obj and isinstance(analysis_obj, AnalysisResult) else "Analysis error or missing."
                     is_sufficient = analysis_obj.is_sufficient if analysis_obj and isinstance(analysis_obj, AnalysisResult) else False
                     sse_data = {"type": "analysis", "result": analysis_text, "is_sufficient": is_sufficient}
-                # --- Handle Strategy Node --- 
                 elif node_name == "propose_strategy":
+                    # This is the node before the interruption
                     sse_event_type = "strategy"
                     sse_data = {"type": "strategy", "proposals": node_output.get("strategy_proposals")}
-                # --- Handle Replanning Step --- 
-                elif node_name == "replan_step":
-                    sse_event_type = "replan"
-                    new_plan = node_output.get("research_plan")
-                    if new_plan: # Check if replan actually occurred
-                        sse_data = {"type": "replan", "message": "Replanning due to error...", "new_plan": new_plan}
-                    else: # Replanner decided not to change plan
-                         sse_data = {"type": "replan", "message": "Replanner checked, continuing plan."}
-                         sse_event_type = None # Don't send SSE if no actual replan occurred
-                # --- Handle End Node --- 
-                elif node_name == END:
-                     sse_event_type = "end"
-                     # Final response is still strategy proposals if reached
-                     final_resp = node_output.get("strategy_proposals", "Pipeline finished.") 
-                     sse_data = {"type": "final_response", "response": final_resp}
-
+                    is_interruption = True # Signal that the next step is user feedback
+                    
+                # Note: We won't receive an END event because we interrupt before it.
                 # Only yield if we have a specific event type assigned
                 if sse_event_type:
                     yield f"event: {sse_event_type}\ndata: {json.dumps(sse_data)}\n\n"
-                
-                if node_name == END:
-                    break 
+                    
+                # If this was the step before interruption, send a specific event
+                if is_interruption:
+                    feedback_data = {"type": "awaiting_feedback", "message": "Pipeline paused. Review the proposals and provide feedback or confirmation to continue.", "state_id": current_state_id}
+                    yield f"event: feedback\ndata: {json.dumps(feedback_data)}\n\n"
+                    logger.info(f"Pipeline interrupted before END, awaiting feedback. State ID: {current_state_id}")
+                    break # Stop the stream after interruption
 
         except Exception as e:
             logger.error(f"Exception during pipeline stream: {e}", exc_info=True)
             error_data = {"type": "error", "message": str(e)}
             yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
         finally:
-            logger.info(f"--- Pipeline stream finished for Query: {user_query} ---")
-            if sse_event_type != 'end':
-                yield f"event: end\ndata: {json.dumps({'message': 'Stream ended.'})}\n\n"
+            # If the loop finishes without interruption (e.g., error before interruption point)
+            if not is_interruption:
+                logger.info(f"--- Pipeline stream finished UNEXPECTEDLY for Query: {user_query} ---")
+                yield f"event: end\ndata: {json.dumps({'message': 'Stream ended unexpectedly before feedback point.'})}\n\n"
+            # else: Stream ended normally due to interruption, final message sent above
 
     # --- (arun method likely needs complete rewrite or removal for research pipeline) ---
     # async def arun(self, user_input: str):
