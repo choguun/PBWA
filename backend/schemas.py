@@ -36,12 +36,6 @@ class SendEthInput(BaseModel):
 class ScrapeWebsiteInput(BaseModel):
     url: str = Field(description="The URL of the website to scrape.")
 
-class QueryRequest(BaseModel):
-    query: str
-
-class QueryResponse(BaseModel):
-    response: str
-
 class UserProfilePayload(BaseModel):
     """ Defines the structure for the /invoke endpoint request body. """
     user_query: str = Field(..., description="The main query or research topic from the user.")
@@ -66,3 +60,43 @@ class CoinGeckoInput(BaseModel):
     include_market_data: bool = Field(True, description="Whether to include market data (price, market cap, volume) when fetching full coin data.")
 
     # Add validation later if needed to ensure either token_id OR (contract_address + asset_platform_id) is provided
+
+class TwitterInput(BaseModel):
+    query: str = Field(..., description="The search query for finding recent tweets. Use standard Twitter search operators.")
+    max_results: int = Field(10, description="Maximum number of tweets to return (between 10 and 100).", ge=10, le=100)
+
+# --- Request/Response Schemas ---
+# Remove unused QueryRequest and QueryResponse
+# class QueryRequest(BaseModel):
+#     pass
+# 
+# class QueryResponse(BaseModel):
+#     response: str
+
+class UserProfilePayload(BaseModel):
+    """ Defines the structure for the /invoke endpoint request body. """
+    user_query: str = Field(..., description="The main query or research topic from the user.")
+
+class Plan(BaseModel):
+    steps: List[str] = Field(..., description="List of sequential steps for the agent to execute.")
+
+class ReplannerOutput(BaseModel):
+    replan: bool = Field(..., description="Indicates if replanning is necessary.")
+    new_plan: Optional[List[str]] = Field(None, description="The revised plan steps, if replanning occurred.")
+
+# --- New Tool Schemas ---
+class DefiLlamaInput(BaseModel):
+    protocol_slug: str = Field(description="The protocol slug (e.g., 'aave', 'uniswap') as used by DefiLlama.")
+    metric: Optional[str] = Field(None, description="Optional specific metric to fetch (e.g., 'tvl', 'volume'). If None, fetches general protocol data.")
+
+class CoinGeckoInput(BaseModel):
+    token_id: Optional[str] = Field(None, description="The CoinGecko token ID (e.g., 'bitcoin', 'ethereum', 'aave'). Use this OR contract_address.")
+    contract_address: Optional[str] = Field(None, description="The token contract address.")
+    asset_platform_id: Optional[str] = Field(None, description="The CoinGecko asset platform ID (e.g., 'ethereum', 'polygon-pos') required if using contract_address.")
+    include_market_data: bool = Field(True, description="Whether to include market data (price, market cap, volume) when fetching full coin data.")
+
+    # Add validation later if needed to ensure either token_id OR (contract_address + asset_platform_id) is provided
+
+class TwitterInput(BaseModel):
+    query: str = Field(..., description="The search query for finding recent tweets. Use standard Twitter search operators.")
+    max_results: int = Field(10, description="Maximum number of tweets to return (between 10 and 100).", ge=10, le=100)

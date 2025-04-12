@@ -4,11 +4,12 @@ from web3 import Web3
 from ..wallet import EVMWallet # Adjusted relative import
 # Remove Playwright import
 # from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError 
-from ..schemas import SendEthInput, ScrapeWebsiteInput, DefiLlamaInput, CoinGeckoInput # Adjusted relative import
+from ..schemas import SendEthInput, ScrapeWebsiteInput, DefiLlamaInput, CoinGeckoInput, TwitterInput # Import TwitterInput
 # Import implementation functions from sibling modules
 from .web_scraper import scrape_website_content 
 from .defi_llama import call_defi_llama_api
 from .coingecko import call_coingecko_api # Import CoinGecko function
+from .twitter import search_recent_tweets # Import Twitter function
 import json
 import asyncio # Import asyncio
 from typing import Optional
@@ -125,6 +126,26 @@ coingecko_api_tool = Tool(
     args_schema=CoinGeckoInput
 )
 
+# --- Twitter API Tool ---
+def run_twitter_tool(query: str, max_results: int = 10) -> str:
+    """Wrapper to call the Twitter search API and return a string representation."""
+    logger.info(f"Twitter Tool called with query='{query}', max_results={max_results}")
+    try:
+        result_dict = search_recent_tweets(query=query, max_results=max_results)
+        # Consider summarizing or selecting key info if the list is very long
+        # For now, return the full JSON string
+        return json.dumps(result_dict, indent=2)
+    except Exception as e:
+        logger.error(f"Unexpected error running Twitter tool wrapper: {e}", exc_info=True)
+        return f"Unexpected error processing Twitter request: {e}"
+
+twitter_api_tool = Tool(
+    name="twitter_api_tool",
+    func=run_twitter_tool,
+    description="Searches for recent tweets matching a query using the Twitter API v2. Requires a Bearer Token environment variable. Use standard Twitter search operators in the 'query'.",
+    args_schema=TwitterInput
+)
+
 # --- send_ethereum tool --- 
 # Implementation remains here as it uses local wallet instance
 @tool(args_schema=SendEthInput)
@@ -166,6 +187,7 @@ agent_tools = [
     web_scraper,          # Sync wrapper using asyncio.run
     defi_llama_api_tool,  # Sync wrapper
     coingecko_api_tool,   # Add CoinGecko tool
+    twitter_api_tool,     # Add Twitter tool
     send_ethereum,        # Async tool
     scrape_tool_direct    # Async tool (potentially redundant with web_scraper wrapper)
 ] 

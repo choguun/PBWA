@@ -39,7 +39,15 @@ You have access to the following tools. **Only use these tools**:
         - `Use coingecko_api_tool token_id='ethereum'`
         - `Use coingecko_api_tool contract_address='0xa0b...eb48' asset_platform_id='ethereum'`
 
-5.  **`send_ethereum`**: 
+5.  **`twitter_api_tool`**: 
+    - Description: Searches for recent tweets matching a query using the Twitter API v2. Useful for finding recent sentiment or news. Requires `TWITTER_BEARER_TOKEN` environment variable.
+    - Arguments:
+        - `query` (string, required): The search query using Twitter operators (e.g., `'(#aave OR @aave) lang:en -is:retweet'`).
+        - `max_results` (int, optional): Number of tweets (10-100), defaults to 10.
+    - Example Usage:
+        - `Use twitter_api_tool query='(from:VitalikButerin) OR (#ethereum)' max_results=20`
+
+6.  **`send_ethereum`**: 
     - Description: Sends a specified amount of ETH from the user's configured wallet to a given address. **Use with extreme caution. Always confirm with the user or context if the intent is clear.**
     - Arguments: 
         - `to_address` (string, required): The recipient Ethereum address.
