@@ -13,6 +13,7 @@ import uuid # Import uuid for Qdrant point IDs
 import inspect
 # Qdrant specific imports
 from qdrant_client import models # Import Qdrant models for search
+from datetime import datetime # For timestamping time-series data
 
 from .config import GOOGLE_API_KEY, LLM_MODEL, QDRANT_COLLECTION_NAME
 from .tools import agent_tools
@@ -26,6 +27,12 @@ from .prompts import (
 from .schemas import Plan, ReplannerOutput, PipelineState
 from .vector_store import qdrant_client_instance, embedding_model_instance # Import DB clients
 from qdrant_client.http.models import PointStruct # Import PointStruct for upsert
+
+# InfluxDB specific imports
+from influxdb_client import Point
+
+# Import InfluxDB client and config
+from .timeseries_db import influxdb_client_instance, get_influxdb_write_api, INFLUXDB_BUCKET, INFLUXDB_ORG
 
 # Get a logger instance for this module
 logger = logging.getLogger(__name__)
@@ -58,6 +65,11 @@ class ResearchPipeline:
             logger.warning("Vector store or embedding model not initialized. RAG features disabled.")
             # Optionally raise error if vector store is critical
 
+        # --- Time Series Client --- 
+        self.influxdb_client = influxdb_client_instance
+        if not self.influxdb_client:
+            logger.warning("InfluxDB client not initialized. Time-series features disabled.")
+        
         # --- Prompts ---
         self.planner_prompt = ChatPromptTemplate.from_template(
             PLANNER_PROMPT, # Adjust PLANNER_PROMPT if needed for research focus
@@ -86,6 +98,7 @@ class ResearchPipeline:
         self.workflow.add_node("collect_data", self._collect_data_step)
         self.workflow.add_node("process_data", self._process_data_step) 
         self.workflow.add_node("update_vector_store", self._update_vector_store_node) 
+        self.workflow.add_node("update_timeseries_db", self._timeseries_db_update_node) # Add new node
         self.workflow.add_node("analyze_data", self._analyze_data_step) # Now uses the implemented function
         self.workflow.add_node("propose_strategy", self._propose_strategy_step) # Add strategy node
 
@@ -100,7 +113,10 @@ class ResearchPipeline:
         )
         # Processing and storage flow
         self.workflow.add_edge("process_data", "update_vector_store")
+        self.workflow.add_edge("process_data", "update_timeseries_db")
+        # Both storage nodes now lead to analysis
         self.workflow.add_edge("update_vector_store", "analyze_data") 
+        self.workflow.add_edge("update_timeseries_db", "analyze_data")
         # --- Updated Edges: Analysis -> Strategy -> End ---
         self.workflow.add_edge("analyze_data", "propose_strategy") 
         self.workflow.add_edge("propose_strategy", END) 
@@ -251,16 +267,16 @@ class ResearchPipeline:
         logger.info("--- Processing Collected Data --- ")
         collected_data = state.get("collected_data", [])
         processed_for_vector = []
-        processed_for_timeseries = [] # Placeholder
+        processed_for_timeseries = [] # Will contain InfluxDB Points
         
         if not collected_data:
             logger.warning("No data collected to process.")
             return {"processed_data": {"vector": [], "timeseries": []}}
             
         for i, (task, data) in enumerate(collected_data):
+            # --- Process for Vector Store (Textual Data) ---
             if isinstance(data, str) and not data.startswith("Error:"):
-                # Simple processing: treat strings as documents for vector store
-                # TODO: Add smarter parsing/chunking, identify data types
+                # Simple processing: treat strings as documents
                 doc = {
                     "page_content": data, 
                     "metadata": { 
@@ -270,11 +286,99 @@ class ResearchPipeline:
                     }
                 }
                 processed_for_vector.append(doc)
+            elif isinstance(data, dict) and 'error' not in data:
+                # If data is a dict (e.g., from API tools) and not an error, 
+                # maybe store its JSON string in vector store or just process for timeseries.
+                # For now, let's store a summary/JSON string.
+                doc_content = json.dumps(data, indent=2, default=str)[:4000] # Limit length
+                doc = {
+                    "page_content": f"Data from task: {task}\n{doc_content}",
+                    "metadata": {
+                        "source_task": task,
+                        "collection_step": i,
+                        "data_type": "api_result"
+                    }
+                }
+                processed_for_vector.append(doc)
             else:
-                # Handle errors or non-string data appropriately
-                logger.warning(f"Skipping processing for data from task '{task}' due to type or error: {type(data)}")
+                # Handle errors or unexpected types for vector store
+                logger.warning(f"Skipping vector processing for data from task '{task}' due to type/error: {type(data)}")
+
+            # --- Process for Time Series Store --- 
+            # Example: Extracting TVL from DefiLlama result
+            if isinstance(data, dict) and task.startswith("Use defi_llama_api_tool") and 'error' not in data:
+                protocol_slug = task.split("protocol_slug='")[1].split("'")[0] if "protocol_slug='" in task else "unknown"
+                # Check if it's chart data (list of dicts with 'date')
+                if isinstance(data, list) and all('date' in item for item in data):
+                    points_added = 0
+                    for item in data:
+                        try:
+                            timestamp_sec = int(item['date'])
+                            # Check for TVL
+                            if 'totalLiquidityUSD' in item:
+                                tvl = float(item['totalLiquidityUSD'])
+                                point = Point("protocol_metrics") \
+                                    .tag("protocol", protocol_slug) \
+                                    .tag("source", "defillama") \
+                                    .field("tvl_usd", tvl) \
+                                    .time(timestamp_sec, write_precision='s')
+                                processed_for_timeseries.append(point)
+                                points_added += 1
+                            # TODO: Check for other common chart metrics like daily volume, fees/revenue if keys exist
+                            # Example (assuming keys 'dailyVolumeUSD', 'dailyFeesUSD')
+                            # if 'dailyVolumeUSD' in item:
+                            #     volume = float(item['dailyVolumeUSD'])
+                            #     point_vol = Point("protocol_metrics") \
+                            #         .tag("protocol", protocol_slug).tag("source", "defillama") \
+                            #         .field("daily_volume_usd", volume) \
+                            #         .time(timestamp_sec, write_precision='s')
+                            #     processed_for_timeseries.append(point_vol)
+                            #     points_added += 1
+                        except (ValueError, TypeError, KeyError) as e:
+                            logger.warning(f"Skipping DefiLlama point for {protocol_slug} due to parsing error: {e} - Item: {item}")
+                    if points_added > 0:
+                        logger.info(f"Processed {points_added} time-series points for '{protocol_slug}' from DefiLlama charts.")
+            
+            # Example: Extracting Market Data from CoinGecko result
+            elif isinstance(data, dict) and task.startswith("Use coingecko_api_tool") and 'error' not in data:
+                token_id = data.get('id')
+                if token_id and 'market_data' in data:
+                    md = data['market_data']
+                    points_added = 0
+                    try:
+                        point = Point("token_market_data") \
+                            .tag("token_id", token_id) \
+                            .tag("source", "coingecko")
+                            
+                        # Price (already handled, but let's integrate into single point)
+                        if 'current_price' in md and isinstance(md['current_price'], dict) and 'usd' in md['current_price']:
+                            price_usd = float(md['current_price']['usd'])
+                            point = point.field("price_usd", price_usd)
+                            
+                        # Market Cap
+                        if 'market_cap' in md and isinstance(md['market_cap'], dict) and 'usd' in md['market_cap']:
+                            market_cap_usd = float(md['market_cap']['usd'])
+                            point = point.field("market_cap_usd", market_cap_usd)
+
+                        # Total Volume
+                        if 'total_volume' in md and isinstance(md['total_volume'], dict) and 'usd' in md['total_volume']:
+                            total_volume_usd = float(md['total_volume']['usd'])
+                            point = point.field("total_volume_usd", total_volume_usd)
+                        
+                        # Check if any fields were added before adding time and appending
+                        if point.field_keys:
+                            point = point.time(datetime.utcnow()) # Use current time
+                            processed_for_timeseries.append(point)
+                            points_added += 1
+                            
+                    except (ValueError, TypeError, KeyError) as e:
+                        logger.warning(f"Skipping CoinGecko market data point for {token_id} due to parsing error: {e} - Data: {md}")
+                        
+                    if points_added > 0:
+                         logger.info(f"Processed market data point for '{token_id}' from CoinGecko.")
 
         logger.info(f"Processed {len(processed_for_vector)} documents for vector store.")
+        logger.info(f"Processed {len(processed_for_timeseries)} points for time-series store.")
         return {"processed_data": {"vector": processed_for_vector, "timeseries": processed_for_timeseries}}
         
     async def _update_vector_store_node(self, state: PipelineState):
@@ -318,6 +422,44 @@ class ResearchPipeline:
         except Exception as e:
             logger.error(f"Failed to update vector store: {e}", exc_info=True)
             return {"error_log": state.get("error_log", []) + [f"Vector store update failed: {e}"]}
+
+    # --- New Timeseries DB Update Node --- 
+    def _timeseries_db_update_node(self, state: PipelineState):
+        logger.info("--- Updating Time-Series Database --- ")
+        processed_data = state.get("processed_data", {})
+        points_to_write = processed_data.get("timeseries", [])
+        errors = state.get('error_log', [])
+        
+        if not self.influxdb_client:
+            logger.error("Cannot update time-series DB: InfluxDB client not available.")
+            return {"error_log": errors + ["Time-series update skipped: Client unavailable."]}
+        
+        if not points_to_write:
+            logger.info("No new time-series points to write.")
+            return {"current_step_output": "No time-series data to store."}
+
+        write_api = None
+        try:
+            write_api = get_influxdb_write_api(self.influxdb_client)
+            if not write_api:
+                 raise ConnectionError("Failed to obtain InfluxDB write API.")
+                
+            logger.info(f"Writing {len(points_to_write)} points to InfluxDB bucket '{INFLUXDB_BUCKET}'...")
+            write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=points_to_write)
+            logger.info("InfluxDB write complete.")
+            return {"current_step_output": f"Successfully stored {len(points_to_write)} time-series points."}
+            
+        except Exception as e:
+            error_msg = f"Failed to write to InfluxDB: {e}"
+            logger.error(error_msg, exc_info=True)
+            return {"error_log": errors + [error_msg]}
+        finally:
+             if write_api:
+                 try:
+                     write_api.close()
+                 except Exception as close_err:
+                      logger.error(f"Error closing InfluxDB write API: {close_err}")
+                     
 
     async def _analyze_data_step(self, state: PipelineState):
         logger.info("--- Analyzing Data ---")
@@ -508,10 +650,14 @@ class ResearchPipeline:
                 elif node_name == "process_data":
                     sse_event_type = "processing"
                     vector_count = len(node_output.get("processed_data", {}).get("vector", []))
-                    sse_data = {"type": "processing", "message": f"Processed {vector_count} items for storage."}
+                    ts_count = len(node_output.get("processed_data", {}).get("timeseries", []))
+                    sse_data = {"type": "processing", "message": f"Processed {vector_count} vector docs, {ts_count} time-series points."}
                 elif node_name == "update_vector_store":
                     sse_event_type = "storage"
                     sse_data = {"type": "storage", "message": node_output.get("current_step_output", "Storage update completed.")}
+                elif node_name == "update_timeseries_db":
+                    sse_event_type = "storage_ts"
+                    sse_data = {"type": "storage_ts", "message": node_output.get("current_step_output", "Time-series update completed.")}
                 elif node_name == "analyze_data":
                     sse_event_type = "analysis"
                     sse_data = {"type": "analysis", "result": node_output.get("analysis_results")}
