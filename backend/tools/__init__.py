@@ -2,7 +2,7 @@ from langchain_core.tools import Tool, tool
 import logging
 from web3 import Web3
 from ..wallet import EVMWallet # Adjusted relative import]
-from ..schemas import SendEthInput, ScrapeWebsiteInput, DefiLlamaInput, CoinGeckoInput, TwitterInput, OnChainTxHistoryInput, TimeSeriesInput, VfatInput # Import TwitterInput, OnChain schema and TimeSeriesInput
+from ..schemas import SendEthInput, ScrapeWebsiteInput, DefiLlamaInput, CoinGeckoInput, TwitterInput, OnChainTxHistoryInput, TimeSeriesInput, VfatInput, DocumentParseInput # Import TwitterInput, OnChain schema and TimeSeriesInput
 # Import implementation functions from sibling modules
 from .web_scraper import scrape_website_content 
 from .defi_llama import call_defi_llama_api
@@ -11,6 +11,7 @@ from .twitter import search_recent_tweets # Import Twitter function
 from .onchain import get_address_transaction_history # Import onchain function
 from .timeseries_retriever import query_time_series_data # Import timeseries function
 from .vfat_scraper import scrape_vfat_farm # Import vfat scraper function
+from .document_parser import parse_document_upstage # <-- Import new function
 import json
 import asyncio # Import asyncio
 from typing import Optional, Dict, List, Union, Any
@@ -55,11 +56,11 @@ portfolio_retriever = Tool(
 )
 
 # Wrapper function for DefiLlama (imports are handled at top level now)
-def run_defi_llama_tool(protocol_slug: str, metric: Optional[str] = None) -> str:
+def run_defi_llama_tool(protocol_slug: str) -> str:
     """Wrapper to call the DefiLlama API and return a string representation."""
-    logger.info(f"DefiLlama Tool called for protocol: '{protocol_slug}', metric: {metric}")
+    logger.info(f"DefiLlama Tool called for protocol: '{protocol_slug}'")
     try:
-        result_dict = call_defi_llama_api(protocol_slug=protocol_slug, metric=metric)
+        result_dict = call_defi_llama_api(protocol_slug=protocol_slug)
         return json.dumps(result_dict, indent=2) 
     except Exception as e:
         logger.error(f"Unexpected error running DefiLlama tool wrapper: {e}", exc_info=True)
@@ -68,7 +69,7 @@ def run_defi_llama_tool(protocol_slug: str, metric: Optional[str] = None) -> str
 defi_llama_api_tool = Tool(
     name="defi_llama_api_tool",
     func=run_defi_llama_tool,
-    description="Fetches data about DeFi protocols (e.g., TVL, volume, general info) from the DefiLlama API. Use the 'protocol_slug' (like 'aave', 'uniswap') and optionally a 'metric' (like 'tvl').",
+    description="Fetches detailed data about a DeFi protocol (TVL, volume, chain breakdown, etc.) from the DefiLlama API. Use the 'protocol_slug' (like 'aave', 'uniswap').",
     args_schema=DefiLlamaInput
 )
 
@@ -213,24 +214,39 @@ async def send_ethereum(to_address: str, amount_eth: float) -> str:
         logger.exception(f"Error sending ETH to {to_address}: {e}")
         return f"Error sending ETH: {e}"
 
-# --- Web Scraper Content Tool (Direct Async - Remove wrapper if not needed?) ---
-# The async version defined with @tool can be used directly if the calling agent handles async tool calls.
-# If ResearchPipeline._collect_data_step handles calling async tools correctly, 
-# we might not need the synchronous `web_scraper` wrapper `run_web_scraper`.
-# Keeping both for now, but consider simplifying.
+# --- Web Scraper Content Tool (Refactored to explicit Tool definition) ---
+# Remove the old @tool decorated function:
+# @tool(args_schema=ScrapeWebsiteInput)
+# async def scrape_tool_direct(url: str) -> str:
+#     """Direct async tool for scraping website content."""
+#     return await scrape_website_content(url)
 
-@tool(args_schema=ScrapeWebsiteInput)
-async def scrape_tool_direct(url: str) -> str:
-    """Direct async tool for scraping website content."""
-    return await scrape_website_content(url)
+# Define the Tool object explicitly
+scrape_tool_direct = Tool(
+    name="scrape_tool_direct",
+    func=scrape_website_content, # Point to the imported async function
+    description="(Async) Scrapes content from a given website URL. Use for specific information not available via APIs.",
+    args_schema=ScrapeWebsiteInput,
+    coroutine=scrape_website_content # Explicitly provide the coroutine
+)
+
+# --- Document Parser Tool (Upstage) ---
+# Define the Tool object using the imported function and schema
+document_parser = Tool(
+    name="document_parser",
+    func=parse_document_upstage, # The async function we created
+    description="(Async) Parses a local document (PDF, DOCX, etc.) using Upstage Document AI to extract text content page by page. Requires the relative file path.",
+    args_schema=DocumentParseInput,
+    coroutine=parse_document_upstage # Explicitly provide the coroutine
+)
 
 # List of all tools available to the agent
 agent_tools = [
-    portfolio_retriever,          # Sync wrapper using asyncio.run
-    defi_llama_api_tool,  # Sync wrapper
-    coingecko_api_tool,   # Add CoinGecko tool
-    onchain_tx_history_tool, # Add On-chain tool
-    vfat_scraper_tool,    # Add vfat scraper tool
-    send_ethereum,        # Async tool
-    scrape_tool_direct    # Async tool (potentially redundant with web_scraper wrapper)
+    portfolio_retriever,
+    defi_llama_api_tool,
+    coingecko_api_tool,
+    onchain_tx_history_tool,
+    vfat_scraper_tool,
+    scrape_tool_direct,
+    document_parser
 ] 

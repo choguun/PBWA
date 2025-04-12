@@ -13,3 +13,5 @@ GOOGLE_CLOUD_PROJECT=os.getenv("GOOGLE_CLOUD_PROJECT")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333") # Default to localhost if not set
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", None) # Optional API Key
 QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "defi_research")
+
+UPSTAGE_API_KEY = os.getenv("UPSTAGE_API_KEY")

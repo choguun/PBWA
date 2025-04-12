@@ -6,22 +6,17 @@ logger = logging.getLogger(__name__)
 
 DEFI_LLAMA_API_BASE_URL = "https://api.llama.fi"
 
-def call_defi_llama_api(protocol_slug: str, metric: Optional[str] = None) -> Dict[str, Any]:
-    """Calls the DefiLlama API to fetch data for a specific protocol.
+def call_defi_llama_api(protocol_slug: str) -> Dict[str, Any]:
+    """Calls the DefiLlama API to fetch detailed data for a specific protocol.
 
     Args:
         protocol_slug: The protocol slug (e.g., 'aave', 'uniswap').
-        metric: Optional specific metric (e.g., 'tvl', 'volume').
 
     Returns:
         A dictionary containing the API response data or an error message.
     """
-    if metric:
-        url = f"{DEFI_LLAMA_API_BASE_URL}/charts/{protocol_slug}"
-        logger.info(f"Calling DefiLlama API for metric '{metric}' on protocol '{protocol_slug}': {url}")
-    else:
-        url = f"{DEFI_LLAMA_API_BASE_URL}/protocol/{protocol_slug}"
-        logger.info(f"Calling DefiLlama API for general data on protocol '{protocol_slug}': {url}")
+    url = f"{DEFI_LLAMA_API_BASE_URL}/protocol/{protocol_slug}"
+    logger.info(f"Calling DefiLlama API for general data on protocol '{protocol_slug}': {url}")
 
     try:
         response = requests.get(url, timeout=15)

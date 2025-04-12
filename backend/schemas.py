@@ -22,7 +22,6 @@ class ScrapeWebsiteInput(BaseModel):
 
 class DefiLlamaInput(BaseModel):
     protocol_slug: str = Field(description="The protocol slug (e.g., 'aave', 'uniswap') as used by DefiLlama.")
-    metric: Optional[str] = Field(None, description="Optional specific metric to fetch (e.g., 'tvl', 'volume'). If None, fetches general protocol data.")
 
 class CoinGeckoInput(BaseModel):
     token_id: Optional[str] = Field(None, description="The CoinGecko token ID (e.g., 'bitcoin', 'ethereum', 'aave'). Use this OR contract_address.")
@@ -47,6 +46,10 @@ class TimeSeriesInput(BaseModel):
 
 class VfatInput(BaseModel):
     farm_url: str = Field(..., description="The specific URL of the vfat.tools farm page to scrape.")
+
+# --- New Schema for Document Parsing Tool ---
+class DocumentParseInput(BaseModel):
+    file_path: str = Field(..., description="The relative path to the local document file (e.g., 'docs/my_report.pdf') within the workspace.")
 
 # --- API Payload Schemas ---
 class UserProfilePayload(BaseModel):

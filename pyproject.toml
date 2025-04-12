@@ -24,6 +24,7 @@ dependencies = [
     "langchain-google-genai>=2.1.2",
     "langchain-google-vertexai>=2.0.19",
     "langchain-openai>=0.3.12",
+    "langchain-upstage>=0.6.0",
     "langgraph>=0.3.28",
     "playwright>=1.51.0",
     "pydantic>=2.11.3",

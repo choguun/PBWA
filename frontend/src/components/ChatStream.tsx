@@ -126,6 +126,24 @@ const ChatStream: React.FC<ChatStreamProps> = ({ apiEndpoint, payload, onStreamE
         } catch (e) { console.error("Error parsing plan event:", e); }
     });
 
+    // --- Listener for custom search scrape start event ---
+    eventSource.addEventListener('search_scrape_start', (event: MessageEvent) => {
+      try {
+        const eventData = JSON.parse(event.data);
+        console.log('Search Scrape Start Event:', eventData);
+        setMessages((prevMessages) => [
+          ...prevMessages,
+          {
+            id: `search-start-${Date.now()}`,
+            isBot: true,
+            text: `Searching and scraping top results for: \"${eventData.query}\" ...`,
+            type: 'progress', // Or a custom type like 'search_start' if you want specific styling
+          },
+        ]);
+      } catch (e) { console.error("Error parsing search_scrape_start event:", e); }
+    });
+    // --- End listener ---
+
      eventSource.addEventListener('tool_result', (event: MessageEvent) => {
         try {
             const eventData = JSON.parse(event.data);
