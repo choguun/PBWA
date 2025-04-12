@@ -78,6 +78,9 @@ class TimeSeriesInput(BaseModel):
     limit: int = Field(100, description="Maximum number of data points to return.")
     # aggregate_window: Optional[str] = Field(None, description="Aggregation window (e.g., '1h', '1d'). If set, data will be aggregated.")
 
+class VfatInput(BaseModel):
+    farm_url: str = Field(..., description="The specific URL of the vfat.tools farm page to scrape.")
+
 # --- Request/Response Schemas ---
 # Remove unused QueryRequest and QueryResponse
 

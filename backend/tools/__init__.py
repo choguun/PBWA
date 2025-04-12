@@ -4,7 +4,7 @@ from web3 import Web3
 from ..wallet import EVMWallet # Adjusted relative import
 # Remove Playwright import
 # from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError 
-from ..schemas import SendEthInput, ScrapeWebsiteInput, DefiLlamaInput, CoinGeckoInput, TwitterInput, OnChainTxHistoryInput, TimeSeriesInput # Import TwitterInput, OnChain schema and TimeSeriesInput
+from ..schemas import SendEthInput, ScrapeWebsiteInput, DefiLlamaInput, CoinGeckoInput, TwitterInput, OnChainTxHistoryInput, TimeSeriesInput, VfatInput # Import TwitterInput, OnChain schema and TimeSeriesInput
 # Import implementation functions from sibling modules
 from .web_scraper import scrape_website_content 
 from .defi_llama import call_defi_llama_api
@@ -12,6 +12,7 @@ from .coingecko import call_coingecko_api # Import CoinGecko function
 from .twitter import search_recent_tweets # Import Twitter function
 from .onchain import get_address_transaction_history # Import onchain function
 from .timeseries_retriever import query_time_series_data # Import timeseries function
+from .vfat_scraper import scrape_vfat_farm # Import vfat scraper function
 import json
 import asyncio # Import asyncio
 from typing import Optional, Dict, List # Add Dict, List
@@ -200,6 +201,13 @@ time_series_retriever_tool = Tool(
     args_schema=TimeSeriesInput
 )
 
+# --- vfat.tools Scraper Tool (Async) ---
+@tool(args_schema=VfatInput)
+async def vfat_scraper_tool(farm_url: str) -> str:
+    """(Async) Scrapes farm data (APY, pools) from a specific vfat.tools URL. Results are experimental.
+    Use the full URL of the specific farm page (e.g., https://vfat.tools/polygon/quickswap-epoch/)."""
+    return await scrape_vfat_farm(farm_url=farm_url)
+
 # --- send_ethereum tool --- 
 # Implementation remains here as it uses local wallet instance
 @tool(args_schema=SendEthInput)
@@ -244,6 +252,7 @@ agent_tools = [
     twitter_api_tool,     # Add Twitter tool
     onchain_tx_history_tool, # Add On-chain tool
     time_series_retriever_tool, # Add TimeSeries retriever tool
+    vfat_scraper_tool,    # Add vfat scraper tool
     send_ethereum,        # Async tool
     scrape_tool_direct    # Async tool (potentially redundant with web_scraper wrapper)
 ] 
