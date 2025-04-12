@@ -57,20 +57,19 @@ except Exception as e:
 
 @app.post("/invoke")
 async def invoke_agent(payload: UserProfilePayload):
+    """Invokes the agent with user query and profile, returning an SSE stream."""
     if agent is None:
         logger.error("/invoke called but agent failed to initialize.")
-        raise HTTPException(status_code=500, detail="Agent initialization failed. Check server logs.")
-        
-    user_query = payload.user_query
-    user_profile = payload.user_profile
-    
-    logger.info(f"Received invoke request. Query: '{user_query}', Profile provided: {bool(user_profile)}")
+        raise HTTPException(status_code=500, detail="Agent initialization failed.")
 
+    logger.info(f"Received invoke request. Query: '{payload.user_query}', Profile: {payload.user_profile}")
+
+    # Define the async generator for the stream
     async def event_stream():
         logger.info(f"--- Starting agent stream for user query: {payload.user_query} ---")
         # Start the stream by calling the agent's method
-        # Pass ONLY the user_query, as astream_events handles initial state
-        async for event in agent.astream_events(payload.user_query):
+        # Pass BOTH user_query and user_profile
+        async for event in agent.astream_events(payload.user_query, payload.user_profile):
             yield event # Directly yield the formatted SSE string from the agent
 
         logger.info(f"--- Agent stream finished for user query: {payload.user_query} ---")

@@ -1,9 +1,7 @@
 from langchain_core.tools import Tool, tool
 import logging
 from web3 import Web3
-from ..wallet import EVMWallet # Adjusted relative import
-# Remove Playwright import
-# from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError 
+from ..wallet import EVMWallet # Adjusted relative import]
 from ..schemas import SendEthInput, ScrapeWebsiteInput, DefiLlamaInput, CoinGeckoInput, TwitterInput, OnChainTxHistoryInput, TimeSeriesInput, VfatInput # Import TwitterInput, OnChain schema and TimeSeriesInput
 # Import implementation functions from sibling modules
 from .web_scraper import scrape_website_content 
@@ -54,16 +52,6 @@ portfolio_retriever = Tool(
     name="portfolio_retriever",
     func=get_portfolio_retriever,
     description="Fetches the user's current crypto portfolio balances and values.",
-)
-
-# Update Tool definition to use the async function directly
-web_scraper = Tool(
-    name="web_scraper",
-    func=scrape_website_content, # Use the async function directly
-    description="Scrapes content from a given website URL. Use for specific information not available via APIs.",
-    args_schema=ScrapeWebsiteInput,
-    # Modern Langchain/LangGraph often infers coroutine automatically when func is async
-    # but specifying can be clearer if needed: coroutine=scrape_website_content 
 )
 
 # Wrapper function for DefiLlama (imports are handled at top level now)
@@ -184,32 +172,22 @@ time_series_retriever_tool = Tool(
     args_schema=TimeSeriesInput
 )
 
-# --- vfat.tools Scraper Tool (Async) ---
-@tool
-async def vfat_scraper_tool(farm_url: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
-    """(Async) Scrapes farm data (APY, pools) from a specific vfat.tools URL.
-    Provide the full URL of the specific farm page (e.g., https://vfat.tools/polygon/quickswap-epoch/).
-    NOTE: Results depend heavily on website structure and LLM interpretation; may be experimental or fail.
-    Args:
-        farm_url (str): The full URL of the vfat.tools farm page.
-    """
-    # This tool needs access to the state (user_query, user_profile) which isn't directly
-    # available here when defined traditionally. LangGraph tools usually operate on inputs.
-    # Option 1: Modify ResearchPipeline._collect_data_step to manually inject state.
-    # Option 2: Refactor tool definition to accept context (more complex).
-    # Option 3: Simplification - For now, we call scrape_vfat_farm without query/profile.
-    #           The planner *could* include hints in the farm_url if needed, but it's messy.
-    #           Let's proceed with Option 3 for now and acknowledge the limitation.
-    logger.warning("vfat_scraper_tool currently executes without user query/profile context due to tool definition limitations.")
-    
-    # Call the implementation function (which now accepts optional args)
-    result = await scrape_vfat_farm(farm_url=farm_url, user_query=None, user_profile=None) 
-    
-    # The implementation now returns dict/list directly. Tool decorator handles serialization implicitly?
-    # Let's ensure the return is handled cleanly for the agent.
-    # Langchain tools expect a string return usually, unless used within specific agent types.
-    # Since our agent parses JSON string outputs, we should dump the result here.
-    return json.dumps(result, default=str) # Ensure JSON string output
+# --- vfat.tools Scraper Tool (Refactored to explicit Tool definition) ---
+# Remove the old @tool decorated function:
+# @tool
+# async def vfat_scraper_tool(farm_url: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+#    ... (old implementation removed) ...
+
+# Define the Tool object explicitly, pointing to the imported implementation
+vfat_scraper_tool = Tool(
+    name="vfat_scraper_tool",
+    # The actual implementation function from vfat_scraper.py
+    # This function DOES accept user_query and user_profile (as optional)
+    func=scrape_vfat_farm, 
+    description="(Async) Scrapes farm data (APY, pools) from a specific vfat.tools URL using browser automation. Provide the full URL of the specific farm page. Requires context (user_query, user_profile) to be injected by the agent.",
+    args_schema=VfatInput, # Schema should only contain farm_url, as context is injected
+    coroutine=scrape_vfat_farm # Explicitly provide the coroutine
+)
 
 # --- send_ethereum tool --- 
 # Implementation remains here as it uses local wallet instance
@@ -248,13 +226,10 @@ async def scrape_tool_direct(url: str) -> str:
 
 # List of all tools available to the agent
 agent_tools = [
-    portfolio_retriever, 
-    web_scraper,          # Sync wrapper using asyncio.run
+    portfolio_retriever,          # Sync wrapper using asyncio.run
     defi_llama_api_tool,  # Sync wrapper
     coingecko_api_tool,   # Add CoinGecko tool
-    twitter_api_tool,     # Add Twitter tool
     onchain_tx_history_tool, # Add On-chain tool
-    time_series_retriever_tool, # Add TimeSeries retriever tool
     vfat_scraper_tool,    # Add vfat scraper tool
     send_ethereum,        # Async tool
     scrape_tool_direct    # Async tool (potentially redundant with web_scraper wrapper)

@@ -174,12 +174,23 @@ class ResearchPipeline:
 
     # --- Node Implementations --- 
     def _user_profile_node(self, state: PipelineState):
-        """Load the user profile into the state."""
+        """Loads user profile into the state if not already present."""
         logger.info("--- Loading User Profile Step ---")
-        # For now, always load the default profile. 
-        # Could be parameterized based on user ID passed in initial state if needed.
-        profile_data = self._load_profile("default_profile")
-        return {"user_profile": profile_data} # Update state with loaded profile
+        
+        # Check if profile already exists in state (passed from API)
+        existing_profile = state.get("user_profile")
+        
+        if existing_profile is not None:
+            logger.info("Using user profile provided in initial state.")
+            # Profile is already set, no state update needed from this node
+            # Return empty dict to signal no changes to other state keys
+            return {}
+        else:
+            logger.info("No user profile in initial state, loading default profile from file.")
+            # Load the default profile from file as fallback
+            profile_data = self._load_profile("default_profile") 
+            # Update state with the loaded default profile
+            return {"user_profile": profile_data} 
     
     async def _plan_research_step(self, state: PipelineState):
         logger.info("--- Planning Research Step ---")
@@ -212,7 +223,7 @@ class ResearchPipeline:
         collected = state.get("collected_data", [])
         errors = state.get("error_log", []) 
         
-        if not plan: 
+        if not plan:
             logger.info("Research plan empty or finished. No collection needed.")
             return {"research_plan": []}
 
@@ -332,7 +343,6 @@ class ResearchPipeline:
             error_details = f"Unexpected error: {e}"
             
         # --- Update State --- 
-        # If an error occurred, store structured error, otherwise store tool output
         if tool_error:
             step_result = {"error": error_details} 
         else:
@@ -340,7 +350,7 @@ class ResearchPipeline:
             
         newly_collected = (current_task, step_result)
         updated_collected_data = collected + [newly_collected]
-        
+
         return {
             "research_plan": remaining_plan, 
             "collected_data": updated_collected_data,
@@ -897,6 +907,14 @@ class ResearchPipeline:
                 "intermediate_steps": intermediate_steps_str
             })
             
+            # --- Add check for None output from parser --- 
+            if replanner_output is None:
+                error_msg = "Replanner LLM returned invalid output (parsed as None)."
+                logger.error(error_msg)
+                # Default to keeping original plan if replanning output is invalid
+                return {"research_plan": plan, "error_log": errors + [error_msg]}
+            
+            # --- Original logic (only runs if replanner_output is not None) ---
             if replanner_output.replan and replanner_output.new_plan is not None:
                 logger.info(f"Replanner generated a new plan: {replanner_output.new_plan}")
                 # Clear previous analysis result if replanning happens
@@ -934,12 +952,13 @@ class ResearchPipeline:
             return {"current_step_output": "No feedback provided, strategy not refined."}
 
     # --- Streaming Method Update ---
-    async def astream_events(self, user_query: str) -> AsyncGenerator[str, None]: 
+    async def astream_events(self, user_query: str, user_profile: Optional[Dict[str, Any]]) -> AsyncGenerator[str, None]: 
         logger.info(f"--- Starting research pipeline stream for Query: {user_query} ---")
-        # Profile is now loaded by the first node
+        logger.info(f"--- Using User Profile: {user_profile} ---")
+        
         initial_state = PipelineState(
-            user_profile=None, # Will be loaded by the first node
-            user_query=user_query, # Pass the query
+            user_profile=user_profile, 
+            user_query=user_query, 
             research_plan=None,
             collected_data=[],
             processed_data={},
@@ -947,140 +966,209 @@ class ResearchPipeline:
             strategy_proposals=None,
             current_step_output=None,
             error_log=[],
-            feedback=None # Initialize feedback as None
+            feedback=None 
         )
         
         # --- Generate a unique thread_id for this run --- 
         thread_id = str(uuid.uuid4())
         logger.info(f"Generated new thread_id for this run: {thread_id}")
         
-        # Create start event data payload (no profile keys needed here anymore)
+        # Create start event data payload 
         start_data_payload = {
             'input': user_query,
-            'thread_id': thread_id # Include thread_id in start event
+            'thread_id': thread_id,
+            # Optionally include profile summary in start event if needed by frontend?
+            # 'profile_summary': {k: v for k, v in user_profile.items() if v} if user_profile else None
         }
         start_data_json = json.dumps(start_data_payload)
         yield f"event: start\ndata: {start_data_json}\n\n"
     
+        # --- Explicitly send initial status events before the main stream loop ---
+        # 1. Profile Loaded (since it's the first step implied after start)
+        # profile_loaded_data = {"type": "progress", "message": "User profile loaded."}
+        # yield f"event: progress\ndata: {json.dumps(profile_loaded_data)}\n\n"
+        
+        # 2. Planning Started (since it's the next logical step)
+        planning_started_data = {"type": "progress", "message": "Agent planning research steps..."}
+        yield f"event: progress\ndata: {json.dumps(planning_started_data)}\n\n"
+
         # --- Update config with thread_id for checkpointer --- 
         config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 50}
         
-        sse_event_type = "progress"
+        sse_event_type = "progress" # Default type, though less relevant now
         current_state_id = None # Track state ID for potential resume
         is_interruption = False # Initialize before try block
         
         try:
             logger.info(f"Entering self.app.astream loop for thread {thread_id}...")
             # Change stream_mode to "updates"
-            async for event in self.app.astream(initial_state, config=config, stream_mode="updates"): 
-                logger.debug(f"Raw Workflow Event/Update: {event}") 
-                
-                # --- Event Processing for "updates" stream_mode --- 
+            async for event in self.app.astream(initial_state, config=config, stream_mode="updates"):
+                logger.debug(f"Raw Workflow Event/Update: {event}")
+
+                # --- Event Processing for "updates" stream_mode ---
+                # Check if the event is a dictionary and not empty
                 if not isinstance(event, dict) or not event:
-                    logger.warning(f"Received unexpected event type/empty dict from astream: {type(event)}. Skipping.")
+                    logger.warning(f"Received unexpected event structure from astream (not a non-empty dict): {type(event)}. Skipping.")
                     continue
+
+                # Check if it's a node update event (should have one key: the node name)
+                if len(event.keys()) == 1:
+                    node_name = list(event.keys())[0]
+                    node_output = event[node_name] # This is the value associated with the node name key
+
+                    # Add detailed logging before the type check
+                    logger.debug(f"Processing update for Node: {node_name}. Output type: {type(node_output)}")
+
+                    # --- Reinstate Special Handling for load_user_profile ---
+                    # If the profile node event comes through (even if output is None due to no state change),
+                    # just skip it gracefully as we handle the initial message proactively.
+                    if node_name == "load_user_profile":
+                        logger.debug(f"Skipping explicit processing for '{node_name}' event in loop (handled proactively).")
+                        continue # Skip further processing/warning for this node
+
+                    # --- General Validation for all other nodes ---
+                    # Use elif now that the profile node is handled above
+                    elif not isinstance(node_output, dict):
+                        # Log the problematic output for debugging before skipping
+                        logger.warning(f"Node '{node_name}' output is not a dict: Type={type(node_output)}, Value='{node_output}'. Skipping SSE mapping for this update.")
+                        continue # Skip SSE mapping for this non-dict output
                     
-                # In "updates" mode, event is {node_name: node_output_dict}
-                node_name = list(event.keys())[0]
-                node_output = event[node_name] # This is the dict returned by the node
-                
-                # Basic validation of node output structure
-                if not isinstance(node_output, dict):
-                    logger.warning(f"Node '{node_name}' output is not a dict: {type(node_output)}. Skipping SSE for this update.")
+                    # --- If it's a dict (and not load_user_profile), proceed with SSE mapping ---
+                    else: # This 'else' covers the case where node_output *is* a dict for other nodes
+                        logger.debug(f"Node '{node_name}' output is a dict. Keys: {list(node_output.keys())}")
+                        current_state_id = config["configurable"]["thread_id"] # Update state ID on valid node output
+
+                        sse_data = {}
+                        sse_event_type = None
+                        is_interruption = False # Reset interruption flag
+
+                        # Map based on node_name, using data from node_output dict
+                        # NOTE: The specific mapping for "load_user_profile" is now handled above (removed)
+                        if node_name == "plan_research":
+                            plan = node_output.get("research_plan", [])
+                            sse_event_type = "plan"
+                            sse_data = {"type": "plan", "steps": plan}
+                        elif node_name == "collect_data":
+                            current_output = node_output.get("current_step_output")
+                            # --- Extract tool name from the task string --- 
+                            tool_name = "unknown_tool"
+                            collected_data_list = node_output.get("collected_data")
+                            if collected_data_list:
+                                try:
+                                    last_task_tuple = collected_data_list[-1]
+                                    task_string = last_task_tuple[0] # Get the task string
+                                    parts = task_string.split() 
+                                    if len(parts) > 1:
+                                        tool_name = parts[1] # Assume second word is tool name
+                                except (IndexError, TypeError) as e:
+                                     logger.warning(f"Could not parse tool name from task in collected_data: {e}")
+                                     
+                            # --- Prepare result display --- 
+                            result_display = current_output
+                            # Simplified preview logic
+                            if isinstance(current_output, dict) and "error" not in current_output:
+                                 result_display = f"Dict with keys: {list(current_output.keys())}" # Less verbose preview
+                            elif isinstance(current_output, str) and len(current_output) > 200:
+                                 result_display = current_output[:200] + "..."
+                            elif not isinstance(current_output, (str, dict, list, tuple, int, float, bool, type(None))): # Handle other complex types
+                                 result_display = f"<{type(current_output).__name__}> object"
+
+                            sse_event_type = "tool_result"
+                            # Add the extracted tool_name to the SSE data payload
+                            sse_data = {
+                                "type": "tool_result", 
+                                "tool_name": tool_name, 
+                                "result": result_display
+                            } # Send the preview/simplified result
+                        elif node_name == "replan_step":
+                            new_plan = node_output.get("research_plan")
+                            sse_event_type = "replan"
+                            sse_data = {"type": "replan", "message": "Replanning...", "new_plan": new_plan}
+                        elif node_name == "process_data":
+                            vector_count = len(node_output.get("processed_data", {}).get("vector", []))
+                            ts_count = len(node_output.get("processed_data", {}).get("timeseries", []))
+                            sse_event_type = "processing"
+                            sse_data = {"type": "processing", "message": f"Processed {vector_count} vector docs, {ts_count} time-series points."}
+                        elif node_name == "update_vector_store":
+                            message = node_output.get("current_step_output") or "Vector store updated."
+                            sse_event_type = "storage"
+                            sse_data = {"type": "storage", "message": message}
+                        elif node_name == "update_timeseries_db":
+                            message = node_output.get("current_step_output") or "Time-series DB updated."
+                            sse_event_type = "storage_ts"
+                            sse_data = {"type": "storage_ts", "message": message}
+                        elif node_name == "analyze_data":
+                            analysis_obj = node_output.get("analysis_results")
+                            analysis_text = "Analysis error or missing."
+                            is_sufficient = False
+                            # Ensure analysis_obj is correctly typed before accessing attributes
+                            if isinstance(analysis_obj, AnalysisResult):
+                                analysis_text = analysis_obj.analysis_text
+                                is_sufficient = analysis_obj.is_sufficient
+                            sse_event_type = "analysis"
+                            sse_data = {"type": "analysis", "result": analysis_text, "is_sufficient": is_sufficient}
+                        elif node_name == "propose_strategy":
+                            proposals = node_output.get("strategy_proposals")
+                            sse_event_type = "strategy"
+                            sse_data = {"type": "strategy", "proposals": proposals}
+                            is_interruption = True
+                        elif node_name == "refine_strategy":
+                            message = node_output.get("current_step_output") or "Strategy refined."
+                            sse_event_type = "refinement"
+                            sse_data = {"type": "refinement", "message": message}
+                        else:
+                            # This will now correctly skip "load_user_profile" as it's handled above
+                            logger.warning(f"No specific SSE mapping for node: {node_name}. Output keys: {list(node_output.keys())}")
+
+                    # --- Yield Event and Handle Interruption (Common Logic) ---
+                    # This part now runs if node_name == 'load_user_profile' OR if it's another node and node_output is a dict
+                    if sse_event_type:
+                        try:
+                            sse_data_json = json.dumps(sse_data, default=str) # Use default=str for broader serialization
+                            yield f"event: {sse_event_type}\ndata: {sse_data_json}\n\n"
+                        except TypeError as json_err:
+                            logger.error(f"Failed to serialize SSE data for event {sse_event_type}: {json_err}. Data snippet: {str(sse_data)[:200]}")
+                            # Attempt to send a generic error event
+                            try:
+                                error_data_json = json.dumps({'type': 'error', 'message': f'Serialization error for event {sse_event_type}'})
+                                yield f"event: error\ndata: {error_data_json}\n\n"
+                            except Exception: # Fallback if even error serialization fails
+                                yield f"event: error\ndata: {json.dumps({'type': 'error', 'message': 'Unserializable error occurred.'})}\n\n"
+
+                    # Handle interruption separately (only relevant for propose_strategy currently)
+                    if is_interruption: # is_interruption is False unless explicitly set in the mapping block
+                        # Ensure current_state_id is set before interruption
+                        # It should be set if we processed any node output dict successfully before this point.
+                        # If the *first* node output caused interruption (unlikely), current_state_id might be None. Use thread_id as fallback.
+                        state_id_for_feedback = current_state_id or thread_id 
+                        feedback_data = {"type": "awaiting_feedback", "message": "Pipeline paused...", "state_id": state_id_for_feedback}
+                        yield f"event: feedback\ndata: {json.dumps(feedback_data)}\n\n"
+                        logger.info(f"Pipeline interrupted, awaiting feedback. State ID: {state_id_for_feedback}")
+                        break # Exit the loop on interruption
+
+                else:
+                    # Handle cases where event is a dict but doesn't have exactly one key
+                    logger.warning(f"Received unexpected event dictionary structure (keys: {list(event.keys())}). Expected single node update. Skipping: {event}")
                     continue
 
-                logger.debug(f"Processing update for Node: {node_name}, Output Keys: {list(node_output.keys())}")
-                current_state_id = config["configurable"]["thread_id"]
-
-                # --- Map node outputs to SSE events --- 
-                sse_data = {} 
-                sse_event_type = None
-                is_interruption = False # Reset interruption flag
-
-                # Map based on node_name, using data from node_output dict
-                if node_name == "load_user_profile":
-                    sse_event_type = "progress"
-                    sse_data = {"type": "progress", "message": "User profile loaded."}
-                elif node_name == "plan_research":
-                    plan = node_output.get("research_plan", [])
-                    sse_event_type = "plan"
-                    sse_data = {"type": "plan", "steps": plan}
-                elif node_name == "collect_data":
-                    current_output = node_output.get("current_step_output")
-                    # Avoid sending large raw data if it's not an error
-                    result_display = current_output
-                    if isinstance(current_output, dict) and "error" not in current_output:
-                        result_display = {k: str(v)[:100] + ('...' if len(str(v)) > 100 else '') for k, v in current_output.items()}
-                    elif isinstance(current_output, str) and len(current_output) > 200:
-                        result_display = current_output[:200] + "..."
-                        
-                    sse_event_type = "tool_result"
-                    sse_data = {"type": "tool_result", "result": result_display}
-                elif node_name == "replan_step":
-                    new_plan = node_output.get("research_plan")
-                    sse_event_type = "replan"
-                    sse_data = {"type": "replan", "message": "Replanning...", "new_plan": new_plan}
-                elif node_name == "process_data":
-                    vector_count = len(node_output.get("processed_data", {}).get("vector", []))
-                    ts_count = len(node_output.get("processed_data", {}).get("timeseries", []))
-                    sse_event_type = "processing"
-                    sse_data = {"type": "processing", "message": f"Processed {vector_count} vector docs, {ts_count} time-series points."}
-                elif node_name == "update_vector_store":
-                    message = node_output.get("current_step_output") or "Vector store updated."
-                    sse_event_type = "storage"
-                    sse_data = {"type": "storage", "message": message}
-                elif node_name == "update_timeseries_db":
-                    message = node_output.get("current_step_output") or "Time-series DB updated."
-                    sse_event_type = "storage_ts"
-                    sse_data = {"type": "storage_ts", "message": message}
-                elif node_name == "analyze_data":
-                    analysis_obj = node_output.get("analysis_results")
-                    analysis_text = "Analysis error or missing."
-                    is_sufficient = False
-                    if analysis_obj and isinstance(analysis_obj, AnalysisResult):
-                        analysis_text = analysis_obj.analysis_text
-                        is_sufficient = analysis_obj.is_sufficient
-                    sse_event_type = "analysis"
-                    sse_data = {"type": "analysis", "result": analysis_text, "is_sufficient": is_sufficient}
-                elif node_name == "propose_strategy":
-                    proposals = node_output.get("strategy_proposals")
-                    sse_event_type = "strategy"
-                    sse_data = {"type": "strategy", "proposals": proposals}
-                    is_interruption = True 
-                elif node_name == "refine_strategy": 
-                    message = node_output.get("current_step_output") or "Strategy refined."
-                    sse_event_type = "refinement"
-                    sse_data = {"type": "refinement", "message": message}
-                else:
-                    logger.warning(f"No specific SSE mapping for node: {node_name}. Output keys: {list(node_output.keys())}")
-
-                # --- Yield Event and Handle Interruption --- 
-                if sse_event_type:
-                    try:
-                        sse_data_json = json.dumps(sse_data, default=str)
-                        yield f"event: {sse_event_type}\ndata: {sse_data_json}\n\n"
-                    except TypeError as json_err:
-                        logger.error(f"Failed to serialize SSE data for event {sse_event_type}: {json_err}. Data: {sse_data}")
-                        yield f"event: error\ndata: {json.dumps({'type': 'error', 'message': f'Serialization error for event {sse_event_type}'})}\n\n"
-                   
-                if is_interruption:
-                    feedback_data = {"type": "awaiting_feedback", "message": "Pipeline paused...", "state_id": current_state_id}
-                    yield f"event: feedback\ndata: {json.dumps(feedback_data)}\n\n"
-                    logger.info(f"Pipeline interrupted, awaiting feedback. State ID: {current_state_id}")
-                    break 
-                         
             logger.info(f"Exiting self.app.astream loop for thread {thread_id}.")
         # Keep outer try/except for stream setup errors
         except Exception as e:
-            logger.error(f"Exception during pipeline stream setup or outer loop: {e}", exc_info=True)
-            error_data = {"type": "error", "message": str(e)}
-            yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
+            logger.error(f"Exception during pipeline stream setup or outer loop for thread {thread_id}: {e}", exc_info=True)
+            # Attempt to yield a final error event
+            try:
+                error_data = {"type": "error", "message": f"Stream failed: {e}"}
+                yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
+            except Exception: # If error serialization fails
+                 yield f"event: error\ndata: {json.dumps({'type': 'error', 'message': 'Unserializable stream error.'})}\n\n"
         finally:
             # Send end event if stream finishes *without* interruption (error or normal end)
             if not is_interruption:
-                logger.info(f"--- Pipeline stream finished for Thread ID: {config['configurable']['thread_id']} ---")
-                yield f"event: end\ndata: {json.dumps({'message': 'Stream finished.'})}\n\n"
-            # else: Stream ended normally due to interruption, feedback event sent above
+                logger.info(f"--- Pipeline stream finished normally for Thread ID: {thread_id} ---")
+                # Use thread_id from config if available, otherwise use the initial one
+                final_thread_id = config.get("configurable", {}).get("thread_id", thread_id)
+                yield f"event: end\ndata: {json.dumps({'message': 'Stream finished.', 'thread_id': final_thread_id})}\n\n"
+            # else: Stream ended due to interruption, feedback event sent above
 
     # --- (arun method likely needs complete rewrite or removal for research pipeline) ---
     # async def arun(self, user_input: str):
