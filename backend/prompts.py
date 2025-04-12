@@ -49,38 +49,41 @@ DO NOT include any text before or after the JSON object. The response must be pa
 
 REPLANNER_PROMPT = """
 You are a replanner agent for DeFi portfolio management decisions.
+
+**CRITICAL INSTRUCTION:** First, check if the information gathered in the "Info from previous steps" section directly answers the original "Input Query". 
+If it DOES provide the complete answer (e.g., the query was "What is my portfolio?" and the portfolio data is present), 
+your response MUST start with the exact line `FINAL_ANSWER:` followed by the complete answer text.
+
+If the answer is NOT yet fully present, THEN decide if more steps are needed.
+
 Given the input query and history of executed steps, decide the NEXT ACTION.
 
-YOUR ONLY AVAILABLE TOOLS FOR THIS STEP ARE:
-- `submit_final_recommendation`: Use this ONLY when all analysis is complete and you can provide a final, actionable recommendation. (NOTE: Tool not yet implemented in tools.py)
-- `request_more_steps`: Use this if more information MUST be gathered via execution tools (like `send_ethereum`, `price_checker`, etc.) before a final recommendation can be made. Provide the specific steps needed, ensuring you specify parameters for the required tools.
-- `think`: Use this to perform internal analysis or reasoning based on the information gathered so far before deciding on the final recommendation or requesting more steps. (NOTE: Tool not yet implemented in tools.py)
+YOUR POSSIBLE OUTPUTS:
 
-*** VERY IMPORTANT ***
-DO NOT call any execution tools like `portfolio_retriever`, `send_ethereum` directly in your response. Your role is to DECIDE the next phase, not execute it. If you need information from those tools, use `request_more_steps`.
+1.  **If the answer is complete:** Start your entire response with the exact line `FINAL_ANSWER:` followed by the final answer text. Example:
+    ```
+    FINAL_ANSWER: Portfolio for address: 0x...
+    - ETH: 0.123456
+    - USDC: 100.000000
+    ```
 
-WHEN TO REQUEST MORE STEPS (Examples):
-- If you need to send ETH: `request_more_steps` with `send_ethereum` step including `to_address` and `amount_eth`.
-- If market data seems stale (e.g., last price check was long ago), request new data: `request_more_steps` with `price_checker` step (if implemented).
-- If analysis requires combining data not yet gathered.
+2.  **If more steps are needed:** Start your entire response with the exact line `NEW_PLAN:`, followed by numbered steps on new lines. Each step must describe a tool call with necessary parameters. Example:
+    ```
+    NEW_PLAN:
+    Step X: Use send_ethereum to_address='0x...' amount_eth=0.1
+    Step Y: Use price_checker symbol='ETH'
+    ```
 
-CONDITIONS FOR `submit_final_recommendation` (if implemented):
-- Portfolio data has been retrieved.
-- Relevant actions (like send_ethereum) have been completed if requested.
-- Relevant market prices/trends/protocol data checked (if tools implemented).
-- Sufficient number of steps completed to gather necessary info.
-- You have synthesized enough information to make a concrete, actionable recommendation.
+3.  **If you need to think/reason internally (if think tool implemented):** Output a NEW_PLAN with a single step calling the think tool.
+    ```
+    NEW_PLAN:
+    Step 1: Use think with thought=\"Synthesizing the data...\"
+    ```
 
-RESPONSE FORMAT:
-Your response MUST be EXACTLY ONE valid JSON object representing ONE tool call from the three allowed tools (`submit_final_recommendation`, `request_more_steps`, `think`).
-
-Examples (assuming relevant tools exist):
-{{"name": "submit_final_recommendation", "arguments": {{"recommendation": "Detailed recommendation..."}}}}
-{{"name": "request_more_steps", "arguments": {{"steps": ["Step X: Use send_ethereum to_address='0x...' amount_eth=0.1...", "Step Y: Use price_checker symbol='ETH'..."]}}}}
-{{"name": "think", "arguments": {{"thought": "Synthesizing the portfolio data and the ETH transfer result..."}}}}
-
-DO NOT include any other text, explanations, or formatting outside the single JSON object.
-Ensure the `name` field in the JSON corresponds EXACTLY to one of the three allowed tool names.
+**VERY IMPORTANT:**
+- Your response MUST start *exactly* with `FINAL_ANSWER:` or `NEW_PLAN:`. 
+- Do NOT include any other text, explanations, greetings, or formatting before these keywords.
+- Do NOT output JSON.
 """
 
 EXECUTOR_PROMPT = """
