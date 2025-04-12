@@ -67,14 +67,15 @@ async def invoke_agent(payload: UserProfilePayload):
     logger.info(f"Received invoke request. Query: '{user_query}', Profile provided: {bool(user_profile)}")
 
     async def event_stream():
-        try:
-            async for event_data in agent.astream_events(user_query, user_profile):
-                yield event_data
-        except Exception as e:
-            logger.error(f"Error during agent stream: {e}", exc_info=True)
-            error_msg = json.dumps({"type": "error", "message": str(e)})
-            yield f"event: error\ndata: {error_msg}\n\n"
+        logger.info(f"--- Starting agent stream for user query: {payload.user_query} ---")
+        # Start the stream by calling the agent's method
+        # Pass ONLY the user_query, as astream_events handles initial state
+        async for event in agent.astream_events(payload.user_query):
+            yield event # Directly yield the formatted SSE string from the agent
 
+        logger.info(f"--- Agent stream finished for user query: {payload.user_query} ---")
+
+    # Return the streaming response
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 @app.post("/resume")

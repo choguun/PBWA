@@ -62,15 +62,15 @@ class ResumePayload(BaseModel):
 # --- Pipeline State Definition (Moved After Payload Schemas) ---
 class PipelineState(TypedDict):
     user_profile: Optional[UserProfilePayload] = None
-    initial_query: Optional[str] = None
+    user_query: Optional[str] = None
     research_plan: Optional[List[str]] = None
     current_step: Optional[int] = None
     current_step_output: Optional[Any] = None
-    collected_data: Optional[Dict[str, List[Union[Document, str]]]] = None # Use langchain Document
-    processed_data: Optional[Dict[str, List[Union[Document, Point]]]] = None # Use Point instead of TimeSeriesData
+    collected_data: Optional[List[Tuple[str, Any]]] = None
+    processed_data: Optional[Dict[str, List[Union[Document, Point]]]] = None
     analysis_results: Optional[AnalysisResult] = None
-    strategy_proposals: Optional[List[str]] = None
-    error_log: Optional[List[str]] = None # Reverted to error_log: Optional[List[str]]
+    strategy_proposals: Optional[str] = None
+    error_log: Optional[List[str]] = None
     feedback: Optional[str] = None
 
 # --- Planning & Replanning Schemas ---

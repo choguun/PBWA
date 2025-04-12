@@ -107,12 +107,12 @@ You have access to the following tools. **Only use these tools**:
 ## Response Format
 Generate a JSON object containing a list of plan steps.
 ```json
-{
+{{
     "steps": [
         "Use tool_name parameter1='value1' ...",
         "Use other_tool_name ..."
     ]
-}
+}}
 ```
 """
 

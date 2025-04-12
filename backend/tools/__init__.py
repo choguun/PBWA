@@ -39,16 +39,16 @@ TOKENS_TO_CHECK = [
 # Placeholder for where call_defi_llama_api was
 
 # --- Tool Definitions --- 
-def get_portfolio_retriever(query: str):
-    """Retrieves the user's current portfolio holdings."""
-    logger.info(f"Portfolio Retriever called with query: {query}")
-    # Simulate fetching portfolio data
-    portfolio_data = {
-        "ETH": {"balance": 1.5, "usd_value": 4500},
-        "USDC": {"balance": 10000, "usd_value": 10000},
-        "AAVE": {"balance": 50, "usd_value": 5000}
+def get_portfolio_retriever():
+    """Fetches the user's current crypto portfolio balances and values."""
+    # TODO: Integrate with backend/wallet.py to get actual data
+    # For now, return dummy data
+    logger.info("Executing dummy portfolio_retriever tool.")
+    return {
+        "ETH": {"balance": 2.5, "value_usd": 7500.0},
+        "USDC": {"balance": 10000, "value_usd": 10000.0},
+        "AAVE": {"balance": 50, "value_usd": 4500.0}
     }
-    return f"Current Portfolio:\n{portfolio_data}"
 
 portfolio_retriever = Tool(
     name="portfolio_retriever",

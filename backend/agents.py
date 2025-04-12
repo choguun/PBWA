@@ -915,18 +915,27 @@ class ResearchPipeline:
             strategy_proposals=None,
             current_step_output=None,
             error_log=[],
+            feedback=None # Initialize feedback as None
         )
+        
+        # --- Generate a unique thread_id for this run --- 
+        thread_id = str(uuid.uuid4())
+        logger.info(f"Generated new thread_id for this run: {thread_id}")
         
         # Create start event data payload (no profile keys needed here anymore)
         start_data_payload = {
             'input': user_query,
+            'thread_id': thread_id # Include thread_id in start event
         }
         start_data_json = json.dumps(start_data_payload)
         yield f"event: start\ndata: {start_data_json}\n\n"
     
-        config = {"recursion_limit": 50}
+        # --- Update config with thread_id for checkpointer --- 
+        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 50}
+        
         sse_event_type = "progress"
         current_state_id = None # Track state ID for potential resume
+        is_interruption = False # Initialize before try block
         
         try:
             async for event in self.app.astream(initial_state, config=config, stream_mode="values"): # Use stream_mode='values'
@@ -934,63 +943,84 @@ class ResearchPipeline:
                 # stream_mode='values' yields the full state after each node
                 # We need to check which node was *last* executed to determine the event type
                 last_node = event["messages"][-1].name if event.get("messages") else None
-                current_state_id = event.get("checkpoint").ts if event.get("checkpoint") else None # Get state ID if available
+                # Use the config's thread_id as the consistent state ID
+                current_state_id = config["configurable"]["thread_id"]
                 
                 node_name = last_node
-                node_output = event["state"] # The full state is the "output" in values mode
+                node_output = event # The full state is the "output" in values mode
 
                 sse_data = {} 
                 sse_event_type = None
-                is_interruption = False
+                # is_interruption = False # Moved initialization before try block
                 
                 # --- Map node outputs to SSE events --- 
                 if node_name == "load_user_profile":
-                    pass # Maybe send profile loaded event?
+                    # Don't send user profile data to client
+                    sse_event_type = "progress"
+                    sse_data = {"type": "progress", "message": "User profile loaded."}
                 elif node_name == "plan_research":
+                    # Access state correctly for values stream_mode
+                    plan = node_output.get("research_plan", [])
                     sse_event_type = "plan"
-                    sse_data = {"type": "plan", "steps": node_output.get("research_plan", [])}
+                    sse_data = {"type": "plan", "steps": plan}
                 elif node_name == "collect_data":
+                    current_output = node_output.get("current_step_output")
                     sse_event_type = "tool_result"
-                    sse_data = {"type": "tool_result", "result": node_output.get("current_step_output")}
+                    sse_data = {"type": "tool_result", "result": current_output}
                 elif node_name == "replan_step":
+                    new_plan = node_output.get("research_plan")
                     sse_event_type = "replan"
-                    # Check if the *plan* in the state actually changed
-                    # This requires comparing to previous state or checking a flag if set by replan_step
-                    # Simplification: Assume replan_step always signals replan
-                    sse_data = {"type": "replan", "message": "Replanning...", "new_plan": node_output.get("research_plan")}
+                    sse_data = {"type": "replan", "message": "Replanning...", "new_plan": new_plan}
                 elif node_name == "process_data":
-                    sse_event_type = "processing"
                     vector_count = len(node_output.get("processed_data", {}).get("vector", []))
                     ts_count = len(node_output.get("processed_data", {}).get("timeseries", []))
+                    sse_event_type = "processing"
                     sse_data = {"type": "processing", "message": f"Processed {vector_count} vector docs, {ts_count} time-series points."}
                 elif node_name == "update_vector_store":
+                    message = node_output.get("current_step_output") or "Vector store updated."
                     sse_event_type = "storage"
-                    sse_data = {"type": "storage", "message": node_output.get("current_step_output") or "Vector store updated."}
+                    sse_data = {"type": "storage", "message": message}
                 elif node_name == "update_timeseries_db":
+                    message = node_output.get("current_step_output") or "Time-series DB updated."
                     sse_event_type = "storage_ts"
-                    sse_data = {"type": "storage_ts", "message": node_output.get("current_step_output") or "Time-series DB updated."}
+                    sse_data = {"type": "storage_ts", "message": message}
                 elif node_name == "analyze_data":
-                    sse_event_type = "analysis"
                     analysis_obj = node_output.get("analysis_results")
-                    analysis_text = analysis_obj.analysis_text if analysis_obj and isinstance(analysis_obj, AnalysisResult) else "Analysis error or missing."
-                    is_sufficient = analysis_obj.is_sufficient if analysis_obj and isinstance(analysis_obj, AnalysisResult) else False
+                    analysis_text = "Analysis error or missing."
+                    is_sufficient = False
+                    if analysis_obj and isinstance(analysis_obj, AnalysisResult):
+                        analysis_text = analysis_obj.analysis_text
+                        is_sufficient = analysis_obj.is_sufficient
+                    sse_event_type = "analysis"
                     sse_data = {"type": "analysis", "result": analysis_text, "is_sufficient": is_sufficient}
                 elif node_name == "propose_strategy":
-                    # This is the node before the interruption
+                    proposals = node_output.get("strategy_proposals")
                     sse_event_type = "strategy"
-                    sse_data = {"type": "strategy", "proposals": node_output.get("strategy_proposals")}
+                    sse_data = {"type": "strategy", "proposals": proposals}
                     is_interruption = True # Signal that the next step is user feedback
+                elif node_name == "refine_strategy": # Event for refinement step
+                    message = node_output.get("current_step_output") or "Strategy refined."
+                    sse_event_type = "refinement"
+                    sse_data = {"type": "refinement", "message": message}
                     
-                # Note: We won't receive an END event because we interrupt before it.
+                # Note: We won't receive an END event because refine_strategy leads to END, 
+                # but the stream might end here if refinement is the last step.
+                
                 # Only yield if we have a specific event type assigned
                 if sse_event_type:
-                    yield f"event: {sse_event_type}\ndata: {json.dumps(sse_data)}\n\n"
+                    # Ensure data is serializable
+                    try:
+                        sse_data_json = json.dumps(sse_data, default=str) # Use default=str for non-serializable types
+                        yield f"event: {sse_event_type}\ndata: {sse_data_json}\n\n"
+                    except TypeError as json_err:
+                         logger.error(f"Failed to serialize SSE data for event {sse_event_type}: {json_err}. Data: {sse_data}")
+                         yield f"event: error\ndata: {json.dumps({'type': 'error', 'message': f'Serialization error for event {sse_event_type}'})}\n\n"
                     
                 # If this was the step before interruption, send a specific event
                 if is_interruption:
                     feedback_data = {"type": "awaiting_feedback", "message": "Pipeline paused. Review the proposals and provide feedback or confirmation to continue.", "state_id": current_state_id}
                     yield f"event: feedback\ndata: {json.dumps(feedback_data)}\n\n"
-                    logger.info(f"Pipeline interrupted before END, awaiting feedback. State ID: {current_state_id}")
+                    logger.info(f"Pipeline interrupted before refinement, awaiting feedback. State ID: {current_state_id}")
                     break # Stop the stream after interruption
 
         except Exception as e:
@@ -998,11 +1028,11 @@ class ResearchPipeline:
             error_data = {"type": "error", "message": str(e)}
             yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
         finally:
-            # If the loop finishes without interruption (e.g., error before interruption point)
+            # Send end event if stream finishes *without* interruption (error or normal end)
             if not is_interruption:
-                logger.info(f"--- Pipeline stream finished UNEXPECTEDLY for Query: {user_query} ---")
-                yield f"event: end\ndata: {json.dumps({'message': 'Stream ended unexpectedly before feedback point.'})}\n\n"
-            # else: Stream ended normally due to interruption, final message sent above
+                logger.info(f"--- Pipeline stream finished for Thread ID: {config['configurable']['thread_id']} ---")
+                yield f"event: end\ndata: {json.dumps({'message': 'Stream finished.'})}\n\n"
+            # else: Stream ended normally due to interruption, feedback event sent above
 
     # --- (arun method likely needs complete rewrite or removal for research pipeline) ---
     # async def arun(self, user_input: str):
