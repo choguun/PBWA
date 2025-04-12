@@ -121,10 +121,16 @@ class ResearchPipeline:
             }
         )
         self.workflow.add_edge("replan_step", "collect_data")
-        self.workflow.add_edge("process_data", "update_vector_store")
-        self.workflow.add_edge("process_data", "update_timeseries_db")
-        self.workflow.add_edge("update_vector_store", "analyze_data") 
+        
+        # Make storage steps sequential to avoid concurrent writes to current_step_output
+        self.workflow.add_edge("process_data", "update_vector_store") 
+        self.workflow.add_edge("update_vector_store", "update_timeseries_db")
         self.workflow.add_edge("update_timeseries_db", "analyze_data")
+        # Remove old parallel edges converging on analyze_data
+        # self.workflow.add_edge("process_data", "update_timeseries_db") # Removed
+        # self.workflow.add_edge("update_vector_store", "analyze_data")  # Removed
+
+        # Conditional edge after analysis
         self.workflow.add_conditional_edges(
             "analyze_data",
             self._should_propose_strategy_or_replan,
@@ -282,12 +288,33 @@ class ResearchPipeline:
                 if can_execute:
                     try:
                         func = found_tool.func
-                        if inspect.iscoroutinefunction(func):
+                        # --- Special Handling for vfat_scraper_tool to inject context --- 
+                        if tool_name == "vfat_scraper_tool":
+                             user_query_context = state.get('user_query')
+                             user_profile_context = state.get('user_profile')
+                             logger.info("Injecting query/profile context into vfat_scraper_tool call.")
+                             # Add state context to args extracted from task (which is just farm_url)
+                             final_args = {
+                                 **validated_args_dict, # Contains farm_url
+                                 "user_query": user_query_context,
+                                 "user_profile": user_profile_context
+                             }
+                             tool_output = await func(**final_args)
+                        # --- Standard tool execution --- 
+                        elif inspect.iscoroutinefunction(func):
                             tool_output = await func(**validated_args_dict)
                         else:
                             tool_output = func(**validated_args_dict)
-                        logger.info(f"Direct Tool Call Output received for '{tool_name}'.")
-                        logger.debug(f"Tool output snippet: {str(tool_output)[:200]}...")
+                        
+                        logger.info(f"Tool Call Output received for '{tool_name}'.")
+                        # Attempt to pretty-print if JSON, otherwise show snippet
+                        try:
+                             parsed_output = json.loads(tool_output) if isinstance(tool_output, str) else tool_output
+                             pretty_output = json.dumps(parsed_output, indent=2, default=str)
+                             logger.debug(f"Tool output preview:\n{pretty_output[:500]}{'...' if len(pretty_output) > 500 else ''}")
+                        except (json.JSONDecodeError, TypeError):
+                             logger.debug(f"Tool output (non-JSON) snippet: {str(tool_output)[:500]}...")
+
                     except Exception as exec_err:
                         error_msg = f"Error executing tool '{tool_name}' for task '{current_task}': {exec_err}"
                         logger.error(error_msg, exc_info=True)
@@ -938,35 +965,63 @@ class ResearchPipeline:
         is_interruption = False # Initialize before try block
         
         try:
-            async for event in self.app.astream(initial_state, config=config, stream_mode="values"): # Use stream_mode='values'
-                logger.debug(f"Workflow Event/Value: {event}")
-                # stream_mode='values' yields the full state after each node
-                # We need to check which node was *last* executed to determine the event type
-                last_node = event["messages"][-1].name if event.get("messages") else None
-                # Use the config's thread_id as the consistent state ID
-                current_state_id = config["configurable"]["thread_id"]
+            logger.info(f"Entering self.app.astream loop for thread {thread_id}...")
+            # Change stream_mode to "updates"
+            async for event in self.app.astream(initial_state, config=config, stream_mode="updates"): 
+                logger.debug(f"Raw Workflow Event/Update: {event}") 
                 
-                node_name = last_node
-                node_output = event # The full state is the "output" in values mode
+                # --- Event Processing for "updates" stream_mode --- 
+                if not isinstance(event, dict) or not event:
+                    logger.warning(f"Received unexpected event type/empty dict from astream: {type(event)}. Skipping.")
+                    continue
+                    
+                # In "updates" mode, event is {node_name: node_output_dict}
+                node_name = list(event.keys())[0]
+                node_output = event[node_name] # This is the dict returned by the node
+                
+                # Basic validation of node output structure
+                if not isinstance(node_output, dict):
+                    logger.warning(f"Node '{node_name}' output is not a dict: {type(node_output)}. Skipping SSE for this update.")
+                    continue
 
+                logger.debug(f"Processing update for Node: {node_name}, Output Keys: {list(node_output.keys())}")
+                current_state_id = config["configurable"]["thread_id"]
+
+                # --- Check for Errors in Node Output --- 
+                # Errors from nodes should be in the returned dict
+                if node_output.get("error_log") and isinstance(node_output["error_log"], list) and len(node_output["error_log"]) > 0:
+                    # Check if this node *added* the error
+                    # Simple check: Assume if error_log is present, it's the relevant error
+                    last_error = node_output["error_log"][-1]
+                    logger.error(f"Error detected in output from node '{node_name}': {last_error}")
+                    error_data = {"type": "error", "message": f"Error in node '{node_name}': {last_error}"}
+                    yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
+                    break # Stop streaming on first detected error
+
+                # --- Map node outputs to SSE events --- 
                 sse_data = {} 
                 sse_event_type = None
-                # is_interruption = False # Moved initialization before try block
-                
-                # --- Map node outputs to SSE events --- 
+                is_interruption = False # Reset interruption flag
+
+                # Map based on node_name, using data from node_output dict
                 if node_name == "load_user_profile":
-                    # Don't send user profile data to client
                     sse_event_type = "progress"
                     sse_data = {"type": "progress", "message": "User profile loaded."}
                 elif node_name == "plan_research":
-                    # Access state correctly for values stream_mode
                     plan = node_output.get("research_plan", [])
                     sse_event_type = "plan"
                     sse_data = {"type": "plan", "steps": plan}
                 elif node_name == "collect_data":
                     current_output = node_output.get("current_step_output")
+                    # Avoid sending large raw data if it's not an error
+                    result_display = current_output
+                    if isinstance(current_output, dict) and "error" not in current_output:
+                        result_display = {k: str(v)[:100] + ('...' if len(str(v)) > 100 else '') for k, v in current_output.items()}
+                    elif isinstance(current_output, str) and len(current_output) > 200:
+                        result_display = current_output[:200] + "..."
+                        
                     sse_event_type = "tool_result"
-                    sse_data = {"type": "tool_result", "result": current_output}
+                    sse_data = {"type": "tool_result", "result": result_display}
                 elif node_name == "replan_step":
                     new_plan = node_output.get("research_plan")
                     sse_event_type = "replan"
@@ -997,34 +1052,33 @@ class ResearchPipeline:
                     proposals = node_output.get("strategy_proposals")
                     sse_event_type = "strategy"
                     sse_data = {"type": "strategy", "proposals": proposals}
-                    is_interruption = True # Signal that the next step is user feedback
-                elif node_name == "refine_strategy": # Event for refinement step
+                    is_interruption = True 
+                elif node_name == "refine_strategy": 
                     message = node_output.get("current_step_output") or "Strategy refined."
                     sse_event_type = "refinement"
                     sse_data = {"type": "refinement", "message": message}
-                    
-                # Note: We won't receive an END event because refine_strategy leads to END, 
-                # but the stream might end here if refinement is the last step.
-                
-                # Only yield if we have a specific event type assigned
+                else:
+                    logger.warning(f"No specific SSE mapping for node: {node_name}. Output keys: {list(node_output.keys())}")
+
+                # --- Yield Event and Handle Interruption --- 
                 if sse_event_type:
-                    # Ensure data is serializable
                     try:
-                        sse_data_json = json.dumps(sse_data, default=str) # Use default=str for non-serializable types
+                        sse_data_json = json.dumps(sse_data, default=str)
                         yield f"event: {sse_event_type}\ndata: {sse_data_json}\n\n"
                     except TypeError as json_err:
-                         logger.error(f"Failed to serialize SSE data for event {sse_event_type}: {json_err}. Data: {sse_data}")
-                         yield f"event: error\ndata: {json.dumps({'type': 'error', 'message': f'Serialization error for event {sse_event_type}'})}\n\n"
-                    
-                # If this was the step before interruption, send a specific event
+                        logger.error(f"Failed to serialize SSE data for event {sse_event_type}: {json_err}. Data: {sse_data}")
+                        yield f"event: error\ndata: {json.dumps({'type': 'error', 'message': f'Serialization error for event {sse_event_type}'})}\n\n"
+                   
                 if is_interruption:
-                    feedback_data = {"type": "awaiting_feedback", "message": "Pipeline paused. Review the proposals and provide feedback or confirmation to continue.", "state_id": current_state_id}
+                    feedback_data = {"type": "awaiting_feedback", "message": "Pipeline paused...", "state_id": current_state_id}
                     yield f"event: feedback\ndata: {json.dumps(feedback_data)}\n\n"
-                    logger.info(f"Pipeline interrupted before refinement, awaiting feedback. State ID: {current_state_id}")
-                    break # Stop the stream after interruption
-
+                    logger.info(f"Pipeline interrupted, awaiting feedback. State ID: {current_state_id}")
+                    break 
+                         
+            logger.info(f"Exiting self.app.astream loop for thread {thread_id}.")
+        # Keep outer try/except for stream setup errors
         except Exception as e:
-            logger.error(f"Exception during pipeline stream: {e}", exc_info=True)
+            logger.error(f"Exception during pipeline stream setup or outer loop: {e}", exc_info=True)
             error_data = {"type": "error", "message": str(e)}
             yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
         finally:

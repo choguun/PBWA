@@ -15,7 +15,7 @@ from .timeseries_retriever import query_time_series_data # Import timeseries fun
 from .vfat_scraper import scrape_vfat_farm # Import vfat scraper function
 import json
 import asyncio # Import asyncio
-from typing import Optional, Dict, List # Add Dict, List
+from typing import Optional, Dict, List, Union, Any
 
 logger = logging.getLogger(__name__)
 
@@ -56,31 +56,14 @@ portfolio_retriever = Tool(
     description="Fetches the user's current crypto portfolio balances and values.",
 )
 
-# Updated wrapper function for web scraper
-def run_web_scraper(url: str) -> str:
-    """Executes the web scraping tool by running the async implementation."""
-    logger.info(f"Web Scraper Tool called for URL: {url}")
-    try:
-        # Run the async function using asyncio.run
-        # Note: asyncio.run creates a new event loop. 
-        # If called frequently or from within an existing loop, consider loop management.
-        content = asyncio.run(scrape_website_content(url))
-        return content if content else "Scraping returned no content."
-    except ModuleNotFoundError:
-         logger.error("web_scraper.py or scrape_website_content not found.")
-         return "Error: Web scraper implementation not found."
-    except RuntimeError as e:
-        logger.error(f"RuntimeError calling async scraper (possibly nested loops?): {e}")
-        return f"Error: Could not run scraper due to runtime issue: {e}"
-    except Exception as e:
-        logger.error(f"Error running web scraper for {url}: {e}", exc_info=True)
-        return f"Error scraping {url}: {e}"
-
+# Update Tool definition to use the async function directly
 web_scraper = Tool(
     name="web_scraper",
-    func=run_web_scraper, 
+    func=scrape_website_content, # Use the async function directly
     description="Scrapes content from a given website URL. Use for specific information not available via APIs.",
-    args_schema=ScrapeWebsiteInput
+    args_schema=ScrapeWebsiteInput,
+    # Modern Langchain/LangGraph often infers coroutine automatically when func is async
+    # but specifying can be clearer if needed: coroutine=scrape_website_content 
 )
 
 # Wrapper function for DefiLlama (imports are handled at top level now)
@@ -202,40 +185,31 @@ time_series_retriever_tool = Tool(
 )
 
 # --- vfat.tools Scraper Tool (Async) ---
-@tool(args_schema=VfatInput)
-async def vfat_scraper_tool(farm_url: str) -> str:
-    """(Async) Scrapes farm data (APY, pools) from a specific vfat.tools URL. Results are experimental.
-    Use the full URL of the specific farm page (e.g., https://vfat.tools/polygon/quickswap-epoch/)."""
-    # Call the implementation function which might return dict, list, or str(error json)
-    result = await scrape_vfat_farm(farm_url=farm_url)
+@tool
+async def vfat_scraper_tool(farm_url: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    """(Async) Scrapes farm data (APY, pools) from a specific vfat.tools URL.
+    Provide the full URL of the specific farm page (e.g., https://vfat.tools/polygon/quickswap-epoch/).
+    NOTE: Results depend heavily on website structure and LLM interpretation; may be experimental or fail.
+    Args:
+        farm_url (str): The full URL of the vfat.tools farm page.
+    """
+    # This tool needs access to the state (user_query, user_profile) which isn't directly
+    # available here when defined traditionally. LangGraph tools usually operate on inputs.
+    # Option 1: Modify ResearchPipeline._collect_data_step to manually inject state.
+    # Option 2: Refactor tool definition to accept context (more complex).
+    # Option 3: Simplification - For now, we call scrape_vfat_farm without query/profile.
+    #           The planner *could* include hints in the farm_url if needed, but it's messy.
+    #           Let's proceed with Option 3 for now and acknowledge the limitation.
+    logger.warning("vfat_scraper_tool currently executes without user query/profile context due to tool definition limitations.")
     
-    # Handle different return types from scrape_vfat_farm and ensure final return is JSON string
-    if isinstance(result, dict): # Handles structured errors or unexpected dicts
-        # If it's an error dict from parsing failure or agent error, it's already JSON-like
-        return json.dumps(result) 
-    elif isinstance(result, list): # Handles successful scrape returning a list
-        # Convert the list of farm data into a JSON string
-        return json.dumps(result, indent=2) 
-    elif isinstance(result, str):
-        # Assume it might be a JSON string already (e.g., from initial URL error)
-        # Or potentially raw text if parsing failed and returned raw string (though we changed that)
-        # Try to return as-is, or wrap if definitely not JSON?
-        # Safest bet: assume it *could* be a raw string error, wrap it.
-        # However, the current scrape_vfat_farm aims to only return dict/list or JSON str errors.
-        # Let's trust the implementation returns JSON-compatible structures.
-        # If it's already a JSON string error from scrape_vfat_farm, this dumps it again, which is ok.
-         try:
-             # Check if it's already a valid JSON string
-             json.loads(result)
-             return result # It was already a JSON string
-         except json.JSONDecodeError:
-             # It was a raw string - wrap it as an error JSON string
-             logger.warning("vfat_scraper_tool received unexpected raw string, wrapping as error.")
-             return json.dumps({"error": "Unexpected raw string output from scraper implementation.", "raw_output": result[:1000]})
-    else:
-        # Handle any other unexpected type
-        logger.error(f"vfat_scraper_tool received unexpected type: {type(result)}")
-        return json.dumps({"error": "Unexpected return type from vfat scraper implementation.", "raw": str(result)[:500]})
+    # Call the implementation function (which now accepts optional args)
+    result = await scrape_vfat_farm(farm_url=farm_url, user_query=None, user_profile=None) 
+    
+    # The implementation now returns dict/list directly. Tool decorator handles serialization implicitly?
+    # Let's ensure the return is handled cleanly for the agent.
+    # Langchain tools expect a string return usually, unless used within specific agent types.
+    # Since our agent parses JSON string outputs, we should dump the result here.
+    return json.dumps(result, default=str) # Ensure JSON string output
 
 # --- send_ethereum tool --- 
 # Implementation remains here as it uses local wallet instance
