@@ -158,7 +158,7 @@ const StreamDisplay: React.FC<StreamDisplayProps> = ({ streamLog }) => {
   }, [streamLog]);
 
   return (
-    <div ref={scrollRef} className="mt-4 p-4 border border-gray-300 rounded-lg shadow-inner bg-white h-[60vh] overflow-y-auto text-sm">
+    <div ref={scrollRef} className="w-full mt-4 p-4 border border-gray-300 rounded-lg shadow-inner bg-white h-[60vh] overflow-y-auto text-sm">
       <h3 className="text-lg font-semibold mb-3 sticky top-0 bg-white pb-2 border-b border-gray-200 z-10">Agent Progress:</h3>
       {streamLog.length === 0 ? (
         <p className="text-gray-500 italic px-2">Waiting for agent to start...</p>
