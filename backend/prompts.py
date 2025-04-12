@@ -49,6 +49,8 @@ Use specific tools like `defi_llama_api_tool` or `coingecko_api_tool` *first* if
         - `Use scrape_tool_direct url='https://example.com/article'`
 
 5.  **`document_parser`**: 
+    - ** ALWAYS USE THIS TOOL FIRST and file_name is pdfs/how-to-defi-avantgarde-compressed.pdf **
+    - ** IMPORTANT: Need to be able to access the file from the workspace root **
     - Description: (Async) Parses a local document (PDF, DOCX, etc.) using Upstage Document AI to extract text content page by page. Provide the relative path from the workspace root.
     - Arguments:
         - `file_path` (string, required): The relative path to the document (e.g., 'invoices/inv_123.pdf', 'docs/report.docx').
@@ -57,21 +59,27 @@ Use specific tools like `defi_llama_api_tool` or `coingecko_api_tool` *first* if
 
 ## Planning Process - **MUST BE TAILORED TO USER PROFILE AND QUERY**
 1.  **Understand Context:** Deeply analyze the user's query and goals, **giving high priority** to their `risk_tolerance` and `preferred_chains` from the profile (if provided).
-2.  **Prioritize Relevant Tools:** Select tools directly applicable to the query and preferred chains. For example, if preferred chains are specified, prioritize `coingecko_api_tool` or `onchain_tx_history_tool` calls relevant to those chains first.
-3.  **Assess Risk Alignment:** Choose plan steps and tools appropriate for the user's `risk_tolerance`. 
-    - For **'low'** risk: Focus on established protocols, fetching core data (portfolio, prices, TVL). Avoid experimental tools like `vfat_scraper_tool` unless absolutely necessary and justified.
-    - For **'medium'** risk: Balance established data with exploration of well-regarded newer opportunities.
-    - For **'high'** risk: More exploration of newer protocols or tools like `vfat_scraper_tool` might be appropriate if relevant to the query.
-4.  **Specify Parameters:** Be specific in the parameters for each tool call, using profile information where applicable (e.g., filter by `asset_platform_id` in `coingecko_api_tool` based on preferred chains if the query allows).
-5.  **Output Format:** The plan must be a list of strings, where each string is a clear instruction starting with 'Use [tool_name]'.
+2.  **Aim for Comprehensive Initial Plan:** Generate an initial plan that aims to gather the core data likely needed to address the query comprehensively. Consider including steps upfront for relevant data categories:
+    *   **Protocol Basics:** Use `defi_llama_api_tool` for TVL, core stats.
+    *   **Token Data:** Use `coingecko_api_tool` for price, market cap, official links.
+    *   **Security/Docs:** Use `google_search_links` (then `scrape_tool_direct`) to find audits, documentation, or major news/risks.
+    *   **Specific Details:** Use `scrape_tool_direct` on official sites for details not in APIs.
+    *   **(If relevant):** Consider `onchain_tx_history_tool` or `vfat_scraper_tool` based on query needs.
+3.  **Prioritize Relevant Tools:** *Within* the comprehensive plan, still prioritize tools directly applicable to the query and preferred chains (e.g., fetch data for preferred chain first). Don't add steps for data clearly irrelevant to the query.
+4.  **Assess Risk Alignment:** Ensure the selected tools and the overall scope of the plan are appropriate for the user's `risk_tolerance`. For low risk, be more conservative in tool selection (e.g., avoid `vfat_scraper_tool` unless essential).
+5.  **Specify Parameters:** Be specific in the parameters for each tool call, using profile information where applicable (e.g., `asset_platform_id` based on preferred chains).
+6.  **Output Format:** The plan must be a list of strings, where each string is a clear instruction starting with 'Use [tool_name]'.
 
-## Required Steps Example Flow (Consider Profile)
-- Query: "Analyze my AAVE position on Polygon and suggest options. Risk: Low."
+## Required Steps Example Flow (Consider Profile & Comprehensive Approach)
+- Query: "Analyze the potential of the Aave protocol on Polygon for yield generation, considering my low risk tolerance."
 - Profile: {{ "risk_tolerance": "low", "preferred_chains": "Polygon, Ethereum" }}
-- Plan (Example - must be adapted based on actual profile/query):
-    1. `Use coingecko_api_tool token_id='aave' asset_platform_id='polygon-pos'` (Get Aave price/data specifically on Polygon first due to query/preference)
-    2. `Use defi_llama_api_tool protocol_slug='aave'` (Get Aave protocol TVL/stats - consider filtering if API supports chain)
-    3. `Use vfat_scraper_tool farm_url='https://vfat.tools/polygon/quickswap-epoch/'`
+- Plan (Example - More Comprehensive Initial Plan):
+    1. `Use coingecko_api_tool token_id='aave'` (Get overall Aave token data & official links)
+    2. `Use defi_llama_api_tool protocol_slug='aave'` (Get Aave protocol TVL/stats - result includes multi-chain data to check Polygon presence)
+    3. `Use google_search_links query='Aave V3 Polygon yield farming strategies audits'` (Search for specific strategies, risks, and security info)
+    4. `Use scrape_tool_direct url='URL_FROM_STEP_3_RESULT_1_IF_RELEVANT'` (Scrape the most promising search result for strategy/audit info)
+    5. `Use scrape_tool_direct url='https://docs.aave.com/'` (Scrape official docs for yield mechanics if not found elsewhere)
+    # Note: Avoided vfat_scraper_tool due to low risk profile.
 
 ## Response Format
 Generate ONLY the JSON object containing a list of plan steps. Do NOT include preamble.
@@ -180,16 +188,26 @@ Your goal is to determine if the original query has been fully answered by the s
     b.  **If the query is NOT fully answered BUT the analysis was sufficient AND the plan has remaining steps:** Allow the current plan to continue.
     c.  **If the query is NOT fully answered AND (critical errors occurred OR analysis was insufficient OR the plan is empty):** Generate a *new*, corrected plan. Use the `analysis_context` suggestions and execution history to inform the new plan.
 
+**Handling Persistent Failures:**
+- **Monitor History:** Look for patterns in `intermediate_steps` and `analysis_context`. If the *same* critical data source (e.g., a specific tool like `defi_llama_api_tool protocol_slug='curve-finance'`, or scraping for specific strategy types) has failed multiple times (e.g., 2-3 consecutive replans triggered by this specific failure), assume it's persistently unavailable.
+- **Stop Replanning:** In cases of persistent failure for critical data:
+    1. Set `replan` to `false`.
+    2. Set `new_plan` to `null`.
+    3. Generate a `final_answer` that clearly:
+        - Summarizes the information *successfully* gathered.
+        - Explicitly states which critical data source(s) failed repeatedly despite attempts.
+        - Concludes that a complete answer or strategy cannot be formulated due to the missing critical data.
+
 **Output Format:**
-You MUST respond with a JSON object containing EITHER `final_answer` OR a new `plan`, but not both.
+You MUST respond with a JSON object matching the following structure. Provide EITHER a `final_answer` OR a `new_plan` (if `replan` is true), but not both active at the same time.
 
 ```json
 {{
-    "replan": true | false, // Indicate if a NEW plan is being generated
+    "replan": true | false, // Indicate if a NEW plan is being generated (false if handling persistent failure or query answered)
     "new_plan": [
-        "Use tool_name parameter1='value1' ..." // List of new steps, OR null if replan=false
+        "Use tool_name parameter1='value1' ..." // List of new steps if replan=true, otherwise MUST be null
     ],
-    "final_answer": "<Final answer if query is resolved, otherwise null>"
+    "final_answer": "<Final answer if query is resolved OR if stopping due to persistent failure, otherwise null>"
 }}
 ```
 """

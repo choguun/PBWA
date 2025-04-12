@@ -48,8 +48,8 @@ async def scrape_website_content(url: str) -> str:
         task_instruction = f"""
         Go to the provided Google search results page: '{url}'.
         Wait for the main search results to load completely (allow up to 15 seconds).
-        Identify the URLs of the first 2 organic search result links. IMPORTANT: Ignore ads, sponsored links, 'People also ask' boxes, image/video carousels, and map results. Focus only on the standard blue link textual results typically found below the ads.
-        If you find fewer than 2 organic links, use only the ones you find.
+        Identify the URLs of the first 1 organic search result links. IMPORTANT: Ignore ads, sponsored links, 'People also ask' boxes, image/video carousels, and map results. Focus only on the standard blue link textual results typically found below the ads.
+        If you find fewer than 1 organic links, use only the ones you find.
         For each identified organic result URL:
         1. Navigate to the URL in the current tab.
         2. Wait for the main content of the page to load (allow up to 20 seconds per page). If a page takes too long, skip it and proceed to the next.
