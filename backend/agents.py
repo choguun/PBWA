@@ -15,7 +15,7 @@ import inspect
 from qdrant_client import models # Import Qdrant models for search
 
 from .config import GOOGLE_API_KEY, LLM_MODEL, QDRANT_COLLECTION_NAME
-from .tools import portfolio_retriever, agent_tools
+from .tools import agent_tools
 from .prompts import (
     PLANNER_PROMPT, 
     EXECUTOR_PROMPT, 
