@@ -4,16 +4,17 @@ from web3 import Web3
 from ..wallet import EVMWallet # Adjusted relative import
 # Remove Playwright import
 # from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError 
-from ..schemas import SendEthInput, ScrapeWebsiteInput, DefiLlamaInput, CoinGeckoInput, TwitterInput, OnChainTxHistoryInput # Import TwitterInput and OnChain schema
+from ..schemas import SendEthInput, ScrapeWebsiteInput, DefiLlamaInput, CoinGeckoInput, TwitterInput, OnChainTxHistoryInput, TimeSeriesInput # Import TwitterInput, OnChain schema and TimeSeriesInput
 # Import implementation functions from sibling modules
 from .web_scraper import scrape_website_content 
 from .defi_llama import call_defi_llama_api
 from .coingecko import call_coingecko_api # Import CoinGecko function
 from .twitter import search_recent_tweets # Import Twitter function
 from .onchain import get_address_transaction_history # Import onchain function
+from .timeseries_retriever import query_time_series_data # Import timeseries function
 import json
 import asyncio # Import asyncio
-from typing import Optional
+from typing import Optional, Dict, List # Add Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,40 @@ onchain_tx_history_tool = Tool(
     args_schema=OnChainTxHistoryInput
 )
 
+# --- Time Series Retriever Tool ---
+def run_time_series_retriever_tool(
+    measurement: str,
+    tags: Optional[Dict[str, str]] = None,
+    fields: Optional[List[str]] = None,
+    start_time: str = "-1h",
+    stop_time: Optional[str] = None,
+    limit: int = 100
+) -> str:
+    """Wrapper to query the time-series database."""
+    logger.info(f"Time Series Retriever Tool called for measurement: {measurement}")
+    try:
+        result_dict = query_time_series_data(
+            measurement=measurement,
+            tags=tags,
+            fields=fields,
+            start_time=start_time,
+            stop_time=stop_time,
+            limit=limit
+        )
+        # Convert dict to string for agent consumption
+        # Consider summarizing or selecting key info if result_dict is very large
+        return json.dumps(result_dict, indent=2)
+    except Exception as e:
+        logger.error(f"Unexpected error running Time Series Retriever tool wrapper: {e}", exc_info=True)
+        return f"Unexpected error processing Time Series Retriever request: {e}"
+
+time_series_retriever_tool = Tool(
+    name="time_series_retriever",
+    func=run_time_series_retriever_tool,
+    description="Retrieves historical time-series data (e.g., token prices, protocol TVL) from the database. Specify measurement, optional tags/fields filters, time range (start_time, stop_time), and limit.",
+    args_schema=TimeSeriesInput
+)
+
 # --- send_ethereum tool --- 
 # Implementation remains here as it uses local wallet instance
 @tool(args_schema=SendEthInput)
@@ -208,6 +243,7 @@ agent_tools = [
     coingecko_api_tool,   # Add CoinGecko tool
     twitter_api_tool,     # Add Twitter tool
     onchain_tx_history_tool, # Add On-chain tool
+    time_series_retriever_tool, # Add TimeSeries retriever tool
     send_ethereum,        # Async tool
     scrape_tool_direct    # Async tool (potentially redundant with web_scraper wrapper)
 ] 

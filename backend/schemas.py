@@ -69,6 +69,15 @@ class OnChainTxHistoryInput(BaseModel):
     address: str = Field(..., description="The blockchain address (e.g., 0x...) for which to fetch transaction history.")
     # Optional: Add startblock, endblock, page, offset, sort later if needed
 
+class TimeSeriesInput(BaseModel):
+    measurement: str = Field(..., description="The InfluxDB measurement to query (e.g., 'token_market_data', 'protocol_metrics').")
+    tags: Optional[Dict[str, str]] = Field(None, description="Dictionary of tag key-value pairs to filter by (e.g., {'token_id': 'bitcoin'}).")
+    fields: Optional[List[str]] = Field(None, description="Specific fields to retrieve (e.g., ['price_usd', 'market_cap_usd']). If None, retrieves all fields.")
+    start_time: str = Field("-1h", description="Start time for the query range (e.g., '-7d', '-1h', or RFC3339 timestamp '2023-01-01T00:00:00Z'). Defaults to -1h.")
+    stop_time: Optional[str] = Field(None, description="End time for the query range (e.g., 'now()', or RFC3339 timestamp). Defaults to now().")
+    limit: int = Field(100, description="Maximum number of data points to return.")
+    # aggregate_window: Optional[str] = Field(None, description="Aggregation window (e.g., '1h', '1d'). If set, data will be aggregated.")
+
 # --- Request/Response Schemas ---
 # Remove unused QueryRequest and QueryResponse
 

@@ -54,7 +54,20 @@ You have access to the following tools. **Only use these tools**:
     - Example Usage:
         - `Use onchain_tx_history_tool address='0x123...abc'`
 
-7.  **`send_ethereum`**: 
+7.  **`time_series_retriever`**:
+    - Description: Retrieves historical time-series data (e.g., token prices, protocol TVL) from the InfluxDB database. Useful for trend analysis or getting historical context.
+    - Arguments:
+        - `measurement` (string, required): The data measurement (e.g., 'token_market_data', 'protocol_metrics').
+        - `tags` (dict, optional): Tags to filter by (e.g., `{{"token_id": "bitcoin"}}` or `{{"protocol": "aave"}}`).
+        - `fields` (list, optional): Specific fields to retrieve (e.g., `["price_usd"]`).
+        - `start_time` (string, optional): Start of time range (defaults '-1h'). Use formats like '-7d', '-30m', or RFC3339.
+        - `stop_time` (string, optional): End of time range (defaults 'now()').
+        - `limit` (int, optional): Max data points (defaults 100).
+    - Example Usage:
+        - `Use time_series_retriever measurement='token_market_data' tags={{"token_id":"aave"}} fields=["price_usd","market_cap_usd"] start_time='-7d' limit=50`
+        - `Use time_series_retriever measurement='protocol_metrics' tags={{"protocol":"uniswap"}} fields=["tvl_usd"] start_time='-30d'`
+
+8.  **`send_ethereum`**: 
     - Description: Sends a specified amount of ETH from the user's configured wallet to a given address. **Use with extreme caution. Always confirm with the user or context if the intent is clear.**
     - Arguments: 
         - `to_address` (string, required): The recipient Ethereum address.
@@ -65,7 +78,6 @@ You have access to the following tools. **Only use these tools**:
 # | `price_checker`           | Retrieves current market price for specified assets.                                                        | `symbol` (string): Token symbol e.g., "BTC", "ETH"                                                                                                | When you need current prices for specific tokens.                                             |
 # | `token_trend_analyser`    | Performs technical and fundamental analysis on specified assets.                                           | `symbol` (string): Asset symbol, `timeframe` (string): Analysis period e.g., "1d", "7d", "30d"                                               | When you need market analysis or trends for specific tokens.                                  |
 # | `list_available_protocols`| Lists all available DeFi protocols known to the agent.                                                     | None                                                                                                                             | When you need to know what protocols are available for interaction.                         |
-# | `time_series_retriever`   | Retrieves historical time-series data (e.g., past actions, market data like APY/TVL).                      | `measurement`, `field`, `start_time`, `stop_time`(opt), `filters`(opt, JSON string), `aggregation_window`(opt), `limit`(opt, default 10) | When you need historical context, past action details, or recent time-series market/protocol data (APY, TVL etc.). |
 # | `submit_final_recommendation` | Submits and logs investment recommendations based on analysis.                                             | `recommendation` (string): Detailed recommendation with rationale                                                                                | When you have a final recommendation.                                                         |
 # | `think`                   | Reasoning tool for complex analysis.                                                                       | `thought` (string): Detailed thought process                                                                                     | When you need to reason through data and observations before the next step.                   |
 
