@@ -8,6 +8,7 @@ from .config import API_KEY, LLM_MODEL
 from .prompts import PLANNER_PROMPT, EXECUTOR_PROMPT, REPLANNER_PROMPT
 from .tools import portfolio_retriever
 from .schemas import Plan, PlanExecute, Act, Response
+from .config import GOOGLE_CLOUD_PROJECT
 
 # --- Mis ---
 def clean_newlines(text: str) -> str:
@@ -18,7 +19,16 @@ def clean_newlines(text: str) -> str:
 class MultiStepAgent:
     def __init__(self):
         # --- LLM and Tools ---
-        self.llm = ChatVertexAI(model_name=LLM_MODEL, temperature=0)
+        # Explicitly get the project ID from environment variables
+        project_id = GOOGLE_CLOUD_PROJECT
+        if not project_id:
+            raise ValueError("GOOGLE_CLOUD_PROJECT environment variable not set!")
+        
+        self.llm = ChatVertexAI(
+            model_name=LLM_MODEL, 
+            temperature=0,
+            project=project_id # Pass the project ID explicitly
+        )
         self.tools = [portfolio_retriever] # Add other tools here if needed
         self.agent_executor = create_react_agent(self.llm, self.tools, state_modifier=EXECUTOR_PROMPT)
 

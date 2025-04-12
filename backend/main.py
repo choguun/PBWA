@@ -1,8 +1,5 @@
 from fastapi import FastAPI
-# Remove BaseModel import if no longer needed directly
-# from pydantic import BaseModel 
 from .agents import MultiStepAgent
-# Import models from the new schemas file
 from .schemas import QueryRequest, QueryResponse
 
 app = FastAPI()
