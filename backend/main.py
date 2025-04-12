@@ -14,4 +14,4 @@ async def invoke_agent(request: QueryRequest):
 @app.get("/")
 async def read_root():
     # Keep the root endpoint for basic checks if needed
-    return {"message": "Planning Agent API is running."}
+    return {"message": "Multi-Step Agent API is running."}

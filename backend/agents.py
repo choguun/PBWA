@@ -2,8 +2,7 @@ from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, StateGraph, START
 from langchain_google_vertexai import ChatVertexAI
-from typing import Annotated, List, Tuple, Optional
-from typing_extensions import TypedDict
+
 from .config import API_KEY, LLM_MODEL
 from .prompts import PLANNER_PROMPT, EXECUTOR_PROMPT, REPLANNER_PROMPT
 from .tools import portfolio_retriever
