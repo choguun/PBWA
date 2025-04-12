@@ -7,273 +7,541 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 import logging
 import json # Import json for formatting streamed data
-from typing import AsyncGenerator # Import AsyncGenerator
+from typing import AsyncGenerator, List, Dict, Any, Tuple, Optional # Import AsyncGenerator
+import re
+import uuid # Import uuid for Qdrant point IDs
+import inspect
+# Qdrant specific imports
+from qdrant_client import models # Import Qdrant models for search
 
-from .config import GOOGLE_API_KEY, LLM_MODEL
+from .config import GOOGLE_API_KEY, LLM_MODEL, QDRANT_COLLECTION_NAME
 from .tools import portfolio_retriever, agent_tools
-from .prompts import PLANNER_PROMPT, EXECUTOR_PROMPT, REPLANNER_PROMPT
-from .schemas import Plan, PlanExecute, ReplannerOutput 
+from .prompts import (
+    PLANNER_PROMPT, 
+    EXECUTOR_PROMPT, 
+    REPLANNER_PROMPT, 
+    ANALYZER_PROMPT,
+    STRATEGIST_PROMPT # Import STRATEGIST_PROMPT
+)
+from .schemas import Plan, ReplannerOutput, PipelineState
+from .vector_store import qdrant_client_instance, embedding_model_instance # Import DB clients
+from qdrant_client.http.models import PointStruct # Import PointStruct for upsert
 
 # Get a logger instance for this module
 logger = logging.getLogger(__name__)
 
-# --- Mis ---
+# --- Helper --- 
 def clean_newlines(text: str) -> str:
     """Removes extra newline characters from a string."""
     return text.replace("\n\n", "\n")
 
-
-class MultiStepAgent:
+class ResearchPipeline:
     def __init__(self):
-        # --- LLM and Tools ---
-        # Explicitly get the project ID from environment variables
-        # project_id = GOOGLE_CLOUD_PROJECT
-        # if not project_id:
-        #     raise ValueError("GOOGLE_CLOUD_PROJECT environment variable not set!")
+        logger.info("Initializing ResearchPipeline...")
+        # --- LLM Initialization ---
+        try:
+            self.llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY, temperature=0)
+            logger.info(f"Successfully initialized ChatGoogleGenerativeAI with Model: {LLM_MODEL}")
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM: {e}", exc_info=True)
+            raise
         
-        self.llm = ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY)
-        self.tools = [portfolio_retriever] # Add other tools here if needed
-        self.agent_executor = create_react_agent(self.llm, self.tools)
+        # --- Tools --- 
+        self.tools = agent_tools # List of tool objects from tools.py
+        self.tool_map = {tool.name: tool for tool in self.tools} # Map tool name to object
+        logger.info(f"Loaded tools: {[tool.name for tool in self.tools]}")
+
+        # --- Vector Store Clients (loaded from vector_store.py) ---
+        self.qdrant_client = qdrant_client_instance
+        self.embedding_model = embedding_model_instance
+        if not self.qdrant_client or not self.embedding_model:
+            logger.warning("Vector store or embedding model not initialized. RAG features disabled.")
+            # Optionally raise error if vector store is critical
 
         # --- Prompts ---
-        self.planner_prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    PLANNER_PROMPT,
-                ),
-                ("placeholder", "{messages}"),
-            ]
+        self.planner_prompt = ChatPromptTemplate.from_template(
+            PLANNER_PROMPT, # Adjust PLANNER_PROMPT if needed for research focus
         )
-
         self.replanner_prompt = ChatPromptTemplate.from_template(
-            REPLANNER_PROMPT,
+            REPLANNER_PROMPT, # Adjust REPLANNER_PROMPT if needed
         )
+        # --- New Analyzer Prompt Template ---
+        self.analyzer_prompt = ChatPromptTemplate.from_template(ANALYZER_PROMPT)
+        # --- New Strategist Prompt Template ---
+        self.strategist_prompt = ChatPromptTemplate.from_template(STRATEGIST_PROMPT)
 
         # --- Chains ---
         self.planner = self.planner_prompt | self.llm.with_structured_output(Plan)
         self.replanner = self.replanner_prompt | self.llm.with_structured_output(ReplannerOutput)
+        # --- New Analyzer Chain ---
+        self.analyzer = self.analyzer_prompt | self.llm | StrOutputParser()
+        # --- New Strategist Chain ---
+        self.strategist = self.strategist_prompt | self.llm | StrOutputParser()
 
         # --- Workflow Definition ---
-        self.workflow = StateGraph(PlanExecute)
-        self.workflow.add_node("planner", self._plan_step)
-        self.workflow.add_node("agent", self._execute_step)
-        self.workflow.add_node("replan", self._replan_step)
-        self.workflow.add_edge(START, "planner")
-        self.workflow.add_edge("planner", "agent")
-        self.workflow.add_edge("agent", "replan")
-        self.workflow.add_conditional_edges("replan", self._should_end, {"agent": "agent", END: END})
+        self.workflow = StateGraph(PipelineState)
+
+        # --- Nodes --- 
+        self.workflow.add_node("plan_research", self._plan_research_step)
+        self.workflow.add_node("collect_data", self._collect_data_step)
+        self.workflow.add_node("process_data", self._process_data_step) 
+        self.workflow.add_node("update_vector_store", self._update_vector_store_node) 
+        self.workflow.add_node("analyze_data", self._analyze_data_step) # Now uses the implemented function
+        self.workflow.add_node("propose_strategy", self._propose_strategy_step) # Add strategy node
+
+        # --- Edges --- 
+        self.workflow.set_entry_point("plan_research")
+        self.workflow.add_edge("plan_research", "collect_data")
+        # Loop logic for data collection
+        self.workflow.add_conditional_edges(
+            "collect_data",
+            self._should_continue_or_process, # Renamed check function
+            {"continue": "collect_data", "process": "process_data"} 
+        )
+        # Processing and storage flow
+        self.workflow.add_edge("process_data", "update_vector_store")
+        self.workflow.add_edge("update_vector_store", "analyze_data") 
+        # --- Updated Edges: Analysis -> Strategy -> End ---
+        self.workflow.add_edge("analyze_data", "propose_strategy") 
+        self.workflow.add_edge("propose_strategy", END) 
+        
+        # Compile the graph
         self.app = self.workflow.compile()
+        logger.info("ResearchPipeline graph compiled.")
 
-        logger.info("Setting up agent executor and prompts...")
-        self.tools = agent_tools
-        if not isinstance(self.tools, list):
-            logger.error(f"agent_tools imported from tools.py is not a list: {self.tools}")
-            raise TypeError("agent_tools must be a list")
+    # --- Node Implementations --- 
+    async def _plan_research_step(self, state: PipelineState):
+        logger.info("--- Planning Research Step ---")
+        user_query = state.get('user_query')
+        user_profile = state.get('user_profile') # Get user profile
+        errors = state.get('error_log', [])
+
+        if not user_query:
+            logger.error("User query is missing from state for planning.")
+            return {"error_log": errors + ["Planning failed: Missing user query."]}
         
-        self.agent_executor = create_react_agent(self.llm, self.tools)
+        # Format profile for prompt
+        user_profile_str = json.dumps(user_profile, indent=2) if user_profile else "Not Provided"
 
         try:
-            logger.info(f"Successfully initialized ChatGoogleGenerativeAI with Model: {LLM_MODEL}")
+            plan_obj: Plan = await self.planner.ainvoke({
+                "input": user_query, 
+                "user_profile": user_profile_str # Pass profile to planner
+            })
+            logger.info(f"Generated Research Plan: {plan_obj.steps}")
+            # Keep profile in state if it was passed in, otherwise it remains None
+            return {"research_plan": plan_obj.steps, "user_profile": user_profile}
         except Exception as e:
-            # Use logger for errors
-            logger.error(f"Failed to initialize ChatGoogleGenerativeAI. Check GOOGLE_API_KEY/model ('{LLM_MODEL}'). Error: {e}", exc_info=True)
-            raise
-
-        logger.info("MultiStepAgent initialized successfully.")
-
-    # --- Workflow Nodes ---
-    async def _plan_step(self, state: PlanExecute):
-        logger.info(f"--- Planning Step --- Input: {state['input']}")
-        plan = await self.planner.ainvoke({"messages": [("user", state["input"])]})
-        logger.info(f"Generated Plan: {plan.steps}")
-        return {"plan": plan.steps, "intermediate_responses": []}
-
-    async def _execute_step(self, state: PlanExecute):
-        plan = state["plan"]
-        if not plan:
-            logger.warning("Execute step called with empty plan.")
-            return {"response": "No more steps in the plan."}
-
-        task = plan[0]
-        step_number = len(state.get("past_steps", [])) + 1
-        logger.info(f"--- Executing Step {step_number}: {task} ---")
+            logger.error(f"Error during planning: {e}", exc_info=True)
+            return {"error_log": errors + [f"Planning failed: {e}"]}
+    
+    async def _collect_data_step(self, state: PipelineState):
+        logger.info("--- Collecting Data Step ---")
+        plan = state.get("research_plan")
+        collected = state.get("collected_data", [])
+        errors = state.get("error_log", []) 
         
-        try:
-            # Pass only the current task to the agent executor
-            agent_executor_input = {"messages": [("user", task)]}
-            logger.debug(f"Agent Executor Input: {agent_executor_input}")
-            
-            agent_response = await self.agent_executor.ainvoke(agent_executor_input)
-            
-            logger.debug(f"Agent Executor Raw Response: {agent_response}")
+        if not plan: 
+             logger.info("Research plan empty or finished. No collection needed.")
+             return {"research_plan": []}
 
-            # Extract direct tool output (same logic as before)
-            if 'output' in agent_response:
-                tool_output = agent_response['output']
-                logger.info(f"Extracted Tool Output for Step {step_number}: {tool_output}")
+        current_task = plan[0]
+        remaining_plan = plan[1:]
+        logger.info(f"Executing plan step: {current_task}")
+
+        tool_output = "Error: Tool execution failed internally."
+        tool_name = "Unknown"
+        try:
+            # --- Refactored Tool ID, Arg Parsing & Validation --- 
+            parts = current_task.split()
+            potential_tool_name = parts[1] if len(parts) > 1 else None
+            found_tool = self.tool_map.get(potential_tool_name)
+            
+            if not found_tool:
+                 error_msg = f"Tool '{potential_tool_name}' not found for task: {current_task}. Available: {list(self.tool_map.keys())}"
+                 logger.error(error_msg)
+                 tool_output = f"Error: {error_msg}"
+                 errors.append(error_msg)
             else:
-                logger.warning(f"'output' key not found in agent_executor response. Falling back to last message. Response keys: {agent_response.keys()}")
-                tool_output = agent_response["messages"][-1].content
-                logger.info(f"Execution Fallback (last message) for Step {step_number}: {tool_output}")
-
-            return {
-                "past_steps": state.get("past_steps", []) + [(task, tool_output)],
-                "plan": plan[1:],
-                "intermediate_responses": state.get("intermediate_responses", []) + [tool_output]
-            }
-        except Exception as e:
-            logger.error(f"Error during execution of step '{task}': {e}", exc_info=True)
-            error_message = f"Error executing step: {e}"
-            return {
-                "past_steps": state.get("past_steps", []) + [(task, error_message)],
-                "plan": plan[1:], 
-                "intermediate_responses": state.get("intermediate_responses", []) + [error_message]
-            }
-
-    async def _replan_step(self, state: PlanExecute):
-        logger.info("--- Replanning Step ---")
-        all_responses = "\n".join(state["intermediate_responses"])
-        all_steps = "\n".join([f"{step}: {response}" for step, response in state["past_steps"]])
-        context = f"Input Query: {state['input']}\n\nInfo from previous steps:\n{all_steps}\n\nDirect tool responses:\n{all_responses}"
-        logger.info(f"Replanner Context:\n{context}")
-        
-        try:
-            # Get structured output matching the new ReplannerOutput model
-            output: ReplannerOutput = await self.replanner.ainvoke({**state, "input": context})
-            logger.info(f"Replanner LLM structured output (ReplannerOutput object): {output}")
-
-            # Parse the ReplannerOutput object
-            if output and output.final_answer:
-                cleaned_response = clean_newlines(output.final_answer)
-                logger.info(f"Replanner decided on Final Response: {cleaned_response}")
-                return {"response": cleaned_response}
-            
-            elif output and output.plan and output.plan.steps:
-                new_steps = output.plan.steps
-                logger.info(f"Replanner decided on New Plan Steps: {new_steps}")
-                return {"plan": new_steps}
-            
-            else:
-                # Handle cases where structured output failed or LLM didn't provide response/plan
-                logger.warning(f"Replanner returned ReplannerOutput object without final_answer or plan.steps. Output: {output}")
-                return {"response": "Agent could not determine a final response or next step after replanning."}
-
-        except Exception as e:
-             logger.error(f"Error during replanning LLM call or structured output parsing: {e}", exc_info=True)
-             return {"response": f"An error occurred during the replanning phase: {e}"} 
-
-    def _should_end(self, state: PlanExecute):
-        logger.debug(f"Checking should_end: response in state = {'response' in state and state['response'] is not None}")
-        return END if "response" in state and state["response"] is not None else "agent"
-
-    # --- NEW: Streaming method --- 
-    async def astream_events(self, user_input: str) -> AsyncGenerator[str, None]:
-        """Runs the agent workflow and yields Server-Sent Events for each step."""
-        logger.info(f"--- Starting agent stream for Input: {user_input} ---")
-        # Use triple quotes for multiline f-string
-        yield f"""event: start
-data: {json.dumps({'input': user_input})}\n\n""" 
-        
-        config = {"recursion_limit": 50}
-        last_event_for_error = None
-        final_response_yielded = False
-
-        try:
-            async for event in self.app.astream(
-                {"input": user_input, "plan": [], "past_steps": [], "response": None, "intermediate_responses": []},
-                config=config,
-            ):
-                last_event_for_error = event # Keep track for error reporting
-                logger.debug(f"Workflow Event: {event}")
-
-                # Determine the event type based on the node that produced it
-                if "planner" in event:
-                    plan_steps = event["planner"].get("plan", [])
-                    event_data = {"type": "plan", "steps": plan_steps}
-                    # Use triple quotes for multiline f-string
-                    yield f"""event: plan\ndata: {json.dumps(event_data)}\n\n"""
+                tool_name = found_tool.name
+                logger.info(f"Identified tool: {tool_name}. Preparing args and validation.")
                 
-                elif "agent" in event: # Corresponds to _execute_step output
-                    agent_data = event["agent"]
-                    past_steps = agent_data.get("past_steps")
-                    if past_steps:
-                        last_task, last_result = past_steps[-1]
-                        event_data = {"type": "tool_result", "task": last_task, "result": last_result}
-                        # Use triple quotes for multiline f-string
-                        yield f"""event: tool_result\ndata: {json.dumps(event_data)}\n\n"""
+                validated_args_dict = {} # Arguments to pass to the tool function
+                can_execute = True
 
-                elif "replan" in event:
-                    replan_data = event["replan"]
-                    if "response" in replan_data and replan_data["response"]:
-                        final_response = replan_data["response"]
-                        event_data = {"type": "final_response", "response": final_response}
-                        # Use triple quotes for multiline f-string
-                        yield f"""event: final_response\ndata: {json.dumps(event_data)}\n\n"""
-                        final_response_yielded = True # Mark as yielded
-                    elif "plan" in replan_data and replan_data["plan"]:
-                        new_plan_steps = replan_data["plan"]
-                        event_data = {"type": "new_plan", "steps": new_plan_steps}
-                        # Use triple quotes for multiline f-string
-                        yield f"""event: new_plan\ndata: {json.dumps(event_data)}\n\n"""
-                    else: pass 
+                # Check if the tool expects arguments via args_schema
+                if hasattr(found_tool, 'args_schema') and found_tool.args_schema:
+                    schema = found_tool.args_schema
+                    schema_fields = schema.__fields__.keys()
+                    logger.debug(f"Tool '{tool_name}' expects args based on schema: {list(schema_fields)}")
 
-                elif END in event:
-                    if not final_response_yielded and isinstance(event[END], dict) and "response" in event[END]:
-                        final_response = event[END]["response"]
-                        event_data = {"type": "final_response", "response": final_response}
-                        # Use triple quotes for multiline f-string
-                        yield f"""event: final_response\ndata: {json.dumps(event_data)}\n\n"""
-                        final_response_yielded = True
-                    logger.info("Workflow reached END state.")
+                    # Basic Regex to extract potential key=value pairs from the task string
+                    # (This is still needed as input isn't guaranteed JSON)
+                    raw_args = {}
+                    pattern = r'(\w+)\s*=\s*[\'"]?([^\s\'"]+)[\'"]?'
+                    prefix = f"Use {tool_name}"
+                    args_part = current_task
+                    if current_task.lower().startswith(prefix.lower()):
+                        args_part = current_task[len(prefix):].strip()
+                    
+                    matches = re.findall(pattern, args_part)
+                    for key, value in matches:
+                         # Only consider keys that are expected by the schema
+                        if key in schema_fields:
+                            raw_args[key] = value
+                        else:
+                             logger.warning(f"Ignoring extracted arg '{key}' as it's not in schema for tool '{tool_name}'")
+
+                    logger.debug(f"Raw args extracted for validation: {raw_args}")
+                    
+                    # Validate using Pydantic
+                    try:
+                        validated_model = schema(**raw_args)
+                        validated_args_dict = validated_model.dict() # Use validated, typed args
+                        logger.info(f"Arguments validated successfully for '{tool_name}': {validated_args_dict}")
+                    except Exception as validation_err: # Catches Pydantic validation errors
+                        error_msg = f"Argument validation failed for tool '{tool_name}'. Task: '{current_task}'. Extracted raw args: {raw_args}. Error: {validation_err}"
+                        logger.error(error_msg)
+                        tool_output = f"Error: {error_msg}"
+                        errors.append(error_msg)
+                        can_execute = False # Prevent calling tool
+                else:
+                    # Tool expects no arguments
+                    logger.info(f"Tool '{tool_name}' does not have an args_schema. Assuming no arguments.")
+                    if len(parts) > 2: # Basic check if extraneous text exists after tool name
+                        logger.warning(f"Task string '{current_task}' contained extra text after tool name '{tool_name}', but tool expects no args.")
+
+                # Execute the tool if possible
+                if can_execute:
+                    func = found_tool.func
+                    if inspect.iscoroutinefunction(func):
+                        tool_output = await func(**validated_args_dict)
+                    else:
+                        tool_output = func(**validated_args_dict)
+                    logger.info(f"Direct Tool Call Output received for '{tool_name}'.")
+                    logger.debug(f"Tool output snippet: {str(tool_output)[:200]}...")
 
         except Exception as e:
-            logger.error(f"Exception during agent workflow stream: {e}", exc_info=True)
-            logger.error(f"Last event before exception: {last_event_for_error}")
-            error_data = {"type": "error", "message": str(e)}
-            # Use triple quotes for multiline f-string
-            yield f"""event: error\ndata: {json.dumps(error_data)}\n\n"""
-        finally:
-            logger.info(f"--- Agent stream finished for Input: {user_input} ---")
-            # Use triple quotes for multiline f-string
-            yield f"""event: end\ndata: {json.dumps({'message': 'Stream ended.'})}\n\n""" 
+            error_msg = f"Unexpected error during tool execution for task '{current_task}': {e}"
+            logger.error(error_msg, exc_info=True)
+            tool_output = f"Error executing task: {e}"
+            errors.append(error_msg)
             
+        # Update state
+        newly_collected = (current_task, tool_output)
+        updated_collected_data = collected + [newly_collected]
+        
+        return {
+            "research_plan": remaining_plan, 
+            "collected_data": updated_collected_data,
+            "current_step_output": tool_output,
+            "error_log": errors
+        }
 
-    # --- arun method (keep for non-streaming use cases or remove if unused) ---
-    async def arun(self, user_input: str):
-         # ... (existing arun implementation) ...
-         # This method now exists alongside astream_events
-         # It iterates through the stream internally but only returns the final result.
-        logger.info(f"--- [arun] Starting agent run for Input: {user_input} ---")
-        config = {"recursion_limit": 50}
-        final_state = None
-        last_event = None
-        try:
-            async for event in self.app.astream(
-                {"input": user_input, "plan": [], "past_steps": [], "response": None, "intermediate_responses": []},
-                config=config,
-            ):
-                last_event = event # Keep track of the last event for error reporting
-                logger.debug(f"[arun] Workflow Event: {event}")
-                if END in event:
-                    final_state = event[END]
-                    logger.info("[arun] Workflow reached END state.")
-        except Exception as e:
-             logger.error(f"[arun] Exception during agent workflow execution: {e}", exc_info=True)
-             logger.error(f"[arun] Last event before exception: {last_event}")
-             return f"An error occurred during agent execution: {e}"
-
-
-        if final_state and "response" in final_state:
-            logger.info(f"--- [arun] Agent run finished. Final Response: {final_state['response']} ---")
-            return final_state['response']
+    def _should_continue_or_process(self, state: PipelineState):
+        # Continue collecting if plan is not empty, otherwise move to process
+        if state.get("research_plan"):
+            logger.info("Plan has remaining steps, continuing collection.")
+            return "continue"
         else:
-            logger.warning(f"[arun] Agent finished without a final response state. Last event: {last_event}")
-            last_state_info = "Unknown state"
-            if last_event:
-                try:
-                     last_state_info = str(list(last_event.values())[0])
-                except Exception:
-                    pass 
-            logger.warning(f"[arun] Last state info: {last_state_info}")
-            return "Agent finished unexpectedly without providing a final response."
+            logger.info("Plan finished, moving to process data.")
+            return "process"
+    
+    def _process_data_step(self, state: PipelineState):
+        logger.info("--- Processing Collected Data --- ")
+        collected_data = state.get("collected_data", [])
+        processed_for_vector = []
+        processed_for_timeseries = [] # Placeholder
+        
+        if not collected_data:
+            logger.warning("No data collected to process.")
+            return {"processed_data": {"vector": [], "timeseries": []}}
+            
+        for i, (task, data) in enumerate(collected_data):
+            if isinstance(data, str) and not data.startswith("Error:"):
+                # Simple processing: treat strings as documents for vector store
+                # TODO: Add smarter parsing/chunking, identify data types
+                doc = {
+                    "page_content": data, 
+                    "metadata": { 
+                        "source_task": task,
+                        "collection_step": i 
+                        # TODO: Add more metadata (URL, tool name, timestamp)
+                    }
+                }
+                processed_for_vector.append(doc)
+            else:
+                # Handle errors or non-string data appropriately
+                logger.warning(f"Skipping processing for data from task '{task}' due to type or error: {type(data)}")
+
+        logger.info(f"Processed {len(processed_for_vector)} documents for vector store.")
+        return {"processed_data": {"vector": processed_for_vector, "timeseries": processed_for_timeseries}}
+        
+    async def _update_vector_store_node(self, state: PipelineState):
+        logger.info("--- Updating Vector Store --- ")
+        processed_data = state.get("processed_data", {})
+        docs_to_embed = processed_data.get("vector", [])
+        
+        if not self.qdrant_client or not self.embedding_model:
+            logger.error("Cannot update vector store: Qdrant client or embedding model not available.")
+            return {"error_log": state.get("error_log", []) + ["Vector store update skipped: Client/Model unavailable."]}
+        
+        if not docs_to_embed:
+            logger.info("No new documents to embed and store.")
+            return {}
+
+        try:
+            logger.info(f"Embedding {len(docs_to_embed)} documents...")
+            contents = [doc["page_content"] for doc in docs_to_embed]
+            embeddings = list(self.embedding_model.embed(contents))
+            logger.info("Embedding complete.")
+
+            points_to_upsert = []
+            for i, doc in enumerate(docs_to_embed):
+                point_id = str(uuid.uuid4())
+                points_to_upsert.append(PointStruct(
+                    id=point_id,
+                    vector=embeddings[i].tolist(), # Convert numpy array if needed
+                    payload=doc["metadata"] # Store metadata
+                ))
+            
+            if points_to_upsert:
+                logger.info(f"Upserting {len(points_to_upsert)} points to Qdrant collection '{QDRANT_COLLECTION_NAME}'...")
+                self.qdrant_client.upsert(
+                    collection_name=QDRANT_COLLECTION_NAME,
+                    points=points_to_upsert,
+                    wait=True # Wait for operation to complete
+                )
+                logger.info("Upsert complete.")
+            return {"current_step_output": f"Successfully stored {len(points_to_upsert)} documents."}
+            
+        except Exception as e:
+            logger.error(f"Failed to update vector store: {e}", exc_info=True)
+            return {"error_log": state.get("error_log", []) + [f"Vector store update failed: {e}"]}
+
+    async def _analyze_data_step(self, state: PipelineState):
+        logger.info("--- Analyzing Data ---")
+        user_query = state.get('user_query')
+        user_profile = state.get('user_profile') # Get user profile
+        collected_data = state.get('collected_data', [])
+        errors = state.get('error_log', [])
+
+        if not user_query:
+            logger.error("Analysis step failed: User query is missing.")
+            return {"error_log": errors + ["Analysis failed: Missing user query."]}
+
+        retrieved_context_str = "No relevant context found in knowledge base."
+        
+        # --- RAG - Retrieve from Qdrant ---
+        if self.qdrant_client and self.embedding_model:
+            try:
+                logger.info(f"Generating embedding for user query: '{user_query[:100]}...'")
+                query_embedding = list(self.embedding_model.embed([user_query]))[0]
+                
+                logger.info(f"Searching Qdrant collection '{QDRANT_COLLECTION_NAME}'...")
+                search_result = self.qdrant_client.search(
+                    collection_name=QDRANT_COLLECTION_NAME,
+                    query_vector=query_embedding,
+                    limit=3 # Retrieve top 3 relevant documents
+                )
+                logger.info(f"Found {len(search_result)} relevant points in Qdrant.")
+
+                # Format retrieved context for the prompt
+                context_parts = []
+                for i, hit in enumerate(search_result):
+                    payload = hit.payload or {} # Handle potentially empty payload
+                    # Safely get content preview and metadata
+                    content_preview = str(payload.get('page_content', 'No content preview available.'))[:200] 
+                    source_task = payload.get('source_task', 'N/A')
+                    score = hit.score
+                    # Format string parts separately
+                    header = f"Context {i+1} (Score: {score:.2f}):"
+                    meta_line = f"Metadata: Source Task: {source_task}"
+                    content_line = f"Content: {content_preview}..."
+                    # Combine parts for this hit with newlines
+                    hit_str = f"{header}\n{meta_line}\n{content_line}\n---"
+                    context_parts.append(hit_str) # Append the formatted string
+                
+                if context_parts:
+                    # Join the already formatted strings
+                    retrieved_context_str = "\n".join(context_parts) 
+                
+            except Exception as e:
+                error_msg = f"Error during RAG search in Qdrant: {e}"
+                logger.error(error_msg, exc_info=True)
+                errors.append(error_msg)
+                retrieved_context_str = f"Error retrieving context: {e}"
+        else:
+            logger.warning("Skipping RAG search: Qdrant client or embedding model not available.")
+            retrieved_context_str = "Context retrieval skipped (DB unavailable)."
+
+        # --- Format Collected Data for Prompt ---
+        collected_data_str = ""
+        if collected_data:
+            formatted_items = []
+            for task, result in collected_data:
+                 result_preview = str(result)[:300] # Limit length
+                 ellipsis = "..." if len(str(result)) > 300 else ""
+                 # Construct string parts separately, avoid complex f-string with newline
+                 task_line = f"- Task: {task}"
+                 result_line = f"  Result: {result_preview}{ellipsis}"
+                 # Combine parts for this item
+                 item_str = f"{task_line}\n{result_line}" 
+                 formatted_items.append(item_str)
+            # Join all items with newlines
+            collected_data_str = "\n".join(formatted_items)
+        else:
+            collected_data_str = "No data was collected in this session."
+            
+        # Format profile for prompt
+        user_profile_str = json.dumps(user_profile, indent=2) if user_profile else "Not Provided"
+            
+        # --- Invoke Analyzer LLM ---
+        logger.info("Invoking Analyzer LLM...")
+        analysis_results = "Analysis failed."
+        try:
+            analysis_results = await self.analyzer.ainvoke({
+                "user_query": user_query,
+                "user_profile": user_profile_str, # Pass profile to analyzer
+                "retrieved_context": retrieved_context_str,
+                "collected_data": collected_data_str
+            })
+            logger.info("Analysis generated successfully.")
+            logger.debug(f"Analysis Result Snippet: {analysis_results[:200]}...")
+        except Exception as e:
+            error_msg = f"Error during LLM Analysis step: {e}"
+            logger.error(error_msg, exc_info=True)
+            errors.append(error_msg)
+            analysis_results = f"Error generating analysis: {e}"
+        
+        return {
+            "analysis_results": analysis_results,
+            "error_log": errors # Pass on any accumulated errors
+        }
+
+    # --- New Strategy Proposal Node --- 
+    async def _propose_strategy_step(self, state: PipelineState):
+        logger.info("--- Proposing Strategy ---")
+        user_query = state.get('user_query')
+        user_profile = state.get('user_profile') # Optional
+        analysis_results = state.get('analysis_results')
+        errors = state.get('error_log', [])
+
+        if not analysis_results:
+            logger.error("Strategy step failed: Analysis results are missing.")
+            return {"error_log": errors + ["Strategy proposal failed: Missing analysis results."]}
+
+        # Format user profile for prompt (if available)
+        user_profile_str = json.dumps(user_profile, indent=2) if user_profile else "Not Provided"
+
+        logger.info("Invoking Strategist LLM...")
+        strategy_proposals = "Strategy proposal failed."
+        try:
+            strategy_proposals = await self.strategist.ainvoke({
+                "user_query": user_query or "Not Provided",
+                "user_profile": user_profile_str,
+                "analysis_results": analysis_results
+            })
+            logger.info("Strategy proposals generated successfully.")
+            logger.debug(f"Strategy Proposals Snippet: {strategy_proposals[:200]}...")
+        except Exception as e:
+            error_msg = f"Error during LLM Strategy proposal step: {e}"
+            logger.error(error_msg, exc_info=True)
+            errors.append(error_msg)
+            strategy_proposals = f"Error generating strategies: {e}"
+        
+        return {
+            "strategy_proposals": strategy_proposals,
+            "error_log": errors # Pass on any accumulated errors
+        }
+
+    # --- Streaming Method Update ---
+    async def astream_events(self, user_query: str, user_profile: Optional[Dict[str, Any]] = None) -> AsyncGenerator[str, None]: # Add user_profile param
+        logger.info(f"--- Starting research pipeline stream for Query: {user_query} ---")
+        # TODO: Implement actual loading/fetching of user profile if not passed directly
+        if user_profile:
+             logger.info(f"Using provided User Profile: {list(user_profile.keys())}")
+        else:
+             logger.info("No user profile provided, proceeding without personalization.")
+             # Optionally load a default or guest profile here
+
+        initial_state = PipelineState(
+            user_profile=user_profile, # Use passed or loaded profile
+            user_query=user_query,
+            research_plan=None,
+            collected_data=[],
+            processed_data={},
+            analysis_results=None,
+            strategy_proposals=None,
+            current_step_output=None,
+            error_log=[],
+        )
+        
+        # --- Create start event data payload separately --- 
+        start_data_payload = {
+            'input': user_query,
+            'profile_keys': list(user_profile.keys()) if user_profile else []
+        }
+        start_data_json = json.dumps(start_data_payload)
+        # Yield the correctly formatted SSE string
+        yield f"event: start\ndata: {start_data_json}\n\n"
+        
+        config = {"recursion_limit": 50} 
+        sse_event_type = "progress" # Default event type
+        
+        try:
+            async for event in self.app.astream(initial_state, config=config):
+                logger.debug(f"Workflow Event: {event}")
+                node_name = list(event.keys())[0]
+                node_output = event[node_name]
+                
+                sse_data = {} # Default empty data
+                sse_event_type = None # Reset event type
+                
+                # --- Map node outputs to SSE events --- 
+                if node_name == "plan_research":
+                    sse_event_type = "plan"
+                    sse_data = {"type": "plan", "steps": node_output.get("research_plan", [])}
+                elif node_name == "collect_data":
+                     sse_event_type = "tool_result"
+                     sse_data = {"type": "tool_result", "result": node_output.get("current_step_output")}
+                elif node_name == "process_data":
+                    sse_event_type = "processing"
+                    vector_count = len(node_output.get("processed_data", {}).get("vector", []))
+                    sse_data = {"type": "processing", "message": f"Processed {vector_count} items for storage."}
+                elif node_name == "update_vector_store":
+                    sse_event_type = "storage"
+                    sse_data = {"type": "storage", "message": node_output.get("current_step_output", "Storage update completed.")}
+                elif node_name == "analyze_data":
+                    sse_event_type = "analysis"
+                    sse_data = {"type": "analysis", "result": node_output.get("analysis_results")}
+                # --- Handle Strategy Node --- 
+                elif node_name == "propose_strategy":
+                    sse_event_type = "strategy"
+                    sse_data = {"type": "strategy", "proposals": node_output.get("strategy_proposals")}
+                # --- Handle End Node --- 
+                elif node_name == END:
+                     sse_event_type = "end"
+                     # Use strategy_proposals as the final response now
+                     final_resp = node_output.get("strategy_proposals", "Pipeline finished.") 
+                     sse_data = {"type": "final_response", "response": final_resp}
+
+                # Only yield if we have a specific event type assigned
+                if sse_event_type:
+                    yield f"event: {sse_event_type}\ndata: {json.dumps(sse_data)}\n\n"
+                
+                if node_name == END:
+                    break 
+
+        except Exception as e:
+            logger.error(f"Exception during pipeline stream: {e}", exc_info=True)
+            error_data = {"type": "error", "message": str(e)}
+            yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
+        finally:
+            logger.info(f"--- Pipeline stream finished for Query: {user_query} ---")
+            if sse_event_type != 'end':
+                yield f"event: end\ndata: {json.dumps({'message': 'Stream ended.'})}\n\n"
+
+    # --- (arun method likely needs complete rewrite or removal for research pipeline) ---
+    # async def arun(self, user_input: str):
+    #    ...

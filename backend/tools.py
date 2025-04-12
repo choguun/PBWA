@@ -1,26 +1,10 @@
 from langchain_core.tools import tool
-from langchain.prompts import PromptTemplate
-from langchain_google_vertexai import ChatVertexAI
-from langchain.schema import AIMessage
-import os
-import json
-import re
-import logging # Import logging
+import logging
 from web3 import Web3
-from pydantic import BaseModel, Field
-
-# Import EVMWallet
 from .wallet import EVMWallet
-# Import Goat SDK EVM tools
-from goat_wallets.evm import send_eth
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from .schemas import SendEthInput, ScrapeWebsiteInput
 
-# Remove goat plugin imports as we define tokens manually
-# from goat_plugins.erc20.token import PEPE, USDC
-# from goat_plugins.erc20 import erc20, ERC20PluginOptions
-
-from .schemas import SendEthInput
-
-# Get logger instance
 logger = logging.getLogger(__name__)
 
 # Instantiate the wallet once
@@ -184,5 +168,59 @@ async def send_ethereum(to_address: str, amount_eth: float) -> str:
         logger.exception(f"Error sending ETH to {to_address}: {e}") # Use logger.exception here
         return f"Error sending ETH: {e}"
 
+@tool(args_schema=ScrapeWebsiteInput)
+async def scrape_website_content(url: str) -> str:
+    """Fetches and returns the main textual content of a given URL using a headless browser."""
+    logger.info(f"Attempting to scrape content from URL: {url}")
+    html_content = ""
+    text_content = "Error: Could not extract text content."
+    
+    # Input validation
+    if not url.startswith(("http://", "https://")):
+        return "Error: Invalid URL format. Please provide a full URL starting with http:// or https://"
+        
+    try:
+        async with async_playwright() as p:
+            # Launch browser (consider chromium, firefox, or webkit)
+            # Headless=True runs without opening a visible browser window
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            logger.debug(f"Navigating to {url}")
+            
+            # Navigate and wait for page to load (adjust timeout as needed)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000) # 30 second timeout
+            logger.debug(f"Page loaded. Extracting content.")
+            
+            # Extract main content - this often needs site-specific selectors for best results
+            # Using body text as a generic fallback
+            # For specific sites (like vfat), you'd use more targeted selectors: 
+            # e.g., await page.locator('#apy-element-id').text_content()
+            html_content = await page.content()
+            body_text = await page.locator('body').inner_text()
+            
+            # Basic cleaning (can be much more sophisticated)
+            text_content = '\n'.join([line.strip() for line in body_text.split('\n') if line.strip()])
+            
+            logger.info(f"Successfully scraped {len(text_content)} characters from {url}")
+            await browser.close()
+            
+    except PlaywrightTimeoutError:
+        logger.error(f"Timeout error while scraping {url}")
+        return f"Error: Timeout occurred while trying to load or scrape {url}"
+    except Exception as e:
+        logger.exception(f"Error scraping URL {url}: {e}") # Log full traceback
+        return f"Error scraping {url}: {e}" 
+        
+    # Return extracted text (consider returning structured data or limiting length)
+    # Limit length to avoid overwhelming LLM context
+    max_len = 4000
+    if len(text_content) > max_len:
+        logger.warning(f"Scraped content truncated from {len(text_content)} to {max_len} characters.")
+        return text_content[:max_len] + "... [Content Truncated]"
+    elif not text_content:
+        return "Error: Could not extract meaningful text content from the page body."
+    else:
+        return text_content
+
 # --- List of tools ---
-agent_tools = [portfolio_retriever, send_ethereum]
+agent_tools = [portfolio_retriever, send_ethereum, scrape_website_content]

@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
-from typing import List, Tuple, Optional, Annotated
-import operator
+from typing import List, Tuple, Optional, Annotated, Dict, Any
 from typing_extensions import TypedDict
+import operator
 
 class QueryRequest(BaseModel):
     query: str
@@ -9,12 +9,16 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     response: str
 
-class PlanExecute(TypedDict):
-    input: str
-    plan: List[str]
-    past_steps: Annotated[List[Tuple[str, str]], operator.add]
-    response: Optional[str]
-    intermediate_responses: List[str]
+class PipelineState(TypedDict):
+    user_profile: Optional[Dict[str, Any]]
+    user_query: str
+    research_plan: Optional[List[str]]
+    collected_data: List[Tuple[str, Any]]
+    processed_data: Dict[str, List[Dict]]
+    analysis_results: Optional[str]
+    strategy_proposals: Optional[str]
+    current_step_output: Optional[Any]
+    error_log: List[str]
 
 class Plan(BaseModel):
     """Plan to follow."""
@@ -28,3 +32,24 @@ class ReplannerOutput(BaseModel):
 class SendEthInput(BaseModel):
     to_address: str = Field(description="The recipient Ethereum address.")
     amount_eth: float = Field(description="The amount of ETH to send.")
+
+class ScrapeWebsiteInput(BaseModel):
+    url: str = Field(description="The URL of the website to scrape.")
+
+class QueryRequest(BaseModel):
+    query: str
+
+class QueryResponse(BaseModel):
+    response: str
+
+class UserProfilePayload(BaseModel):
+    """ Defines the structure for the /invoke endpoint request body. """
+    user_query: str = Field(..., description="The main query or research topic from the user.")
+    user_profile: Optional[Dict[str, Any]] = Field(None, description="Optional dictionary containing user personalization data (risk, goals, etc.).")
+
+class Plan(BaseModel):
+    steps: List[str] = Field(..., description="List of sequential steps for the agent to execute.")
+
+class ReplannerOutput(BaseModel):
+    replan: bool = Field(..., description="Indicates if replanning is necessary.")
+    new_plan: Optional[List[str]] = Field(None, description="The revised plan steps, if replanning occurred.")
