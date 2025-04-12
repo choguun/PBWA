@@ -67,7 +67,14 @@ You have access to the following tools. **Only use these tools**:
         - `Use time_series_retriever measurement='token_market_data' tags={{"token_id":"aave"}} fields=["price_usd","market_cap_usd"] start_time='-7d' limit=50`
         - `Use time_series_retriever measurement='protocol_metrics' tags={{"protocol":"uniswap"}} fields=["tvl_usd"] start_time='-30d'`
 
-8.  **`send_ethereum`**: 
+8.  **`vfat_scraper_tool`**: 
+    - Description: (Experimental) Scrapes farm data (APY, pools) from a specific vfat.tools farm page URL. Prone to breaking if website structure changes.
+    - Arguments:
+        - `farm_url` (string, required): The full URL of the specific vfat.tools farm page (e.g., `https://vfat.tools/polygon/quickswap-epoch/`).
+    - Example Usage:
+        - `Use vfat_scraper_tool farm_url='https://vfat.tools/polygon/quickswap-epoch/'`
+
+9.  **`send_ethereum`**: 
     - Description: Sends a specified amount of ETH from the user's configured wallet to a given address. **Use with extreme caution. Always confirm with the user or context if the intent is clear.**
     - Arguments: 
         - `to_address` (string, required): The recipient Ethereum address.
@@ -132,11 +139,11 @@ You will be given:
 - Review the User Query and User Profile (if provided) to understand the core objective and user context.
 - Examine the Collected Data. Pay attention to both successful data retrieval and any errors encountered.
 - Examine the Retrieved Context for relevant background information or previously discovered insights.
-- Examine the Time Series Context for relevant historical trends or recent performance data.
+- Examine the Time Series Context for relevant historical trends (e.g., price increases/decreases, TVL changes) or recent performance data. Note any errors reported during time-series retrieval.
 - Synthesize *all* the relevant information from Collected Data, Retrieved Context, and Time Series Context, interpreting it in light of the User Profile (e.g., assessing risk findings against user tolerance, noting trends relevant to goals).
 - Address the User Query directly in your analysis.
 - Provide a clear, concise, and factual summary. Highlight key findings, trends, potential risks, or discrepancies found in the data.
-- If significant errors occurred during data collection, mention how they might impact the analysis.
+- If significant errors occurred during data collection or time-series retrieval, mention how they might impact the analysis.
 - Do NOT invent information. Base your analysis strictly on the provided data and context.
 
 **User Query:**

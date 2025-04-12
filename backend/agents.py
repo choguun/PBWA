@@ -18,9 +18,9 @@ from datetime import datetime # For timestamping time-series data
 from .config import GOOGLE_API_KEY, LLM_MODEL, QDRANT_COLLECTION_NAME
 from .tools import agent_tools
 from .prompts import (
-    PLANNER_PROMPT, 
+            PLANNER_PROMPT,
     EXECUTOR_PROMPT, 
-    REPLANNER_PROMPT, 
+    REPLANNER_PROMPT,
     ANALYZER_PROMPT,
     STRATEGIST_PROMPT # Import STRATEGIST_PROMPT
 )
@@ -192,8 +192,8 @@ class ResearchPipeline:
         errors = state.get("error_log", []) 
         
         if not plan: 
-             logger.info("Research plan empty or finished. No collection needed.")
-             return {"research_plan": []}
+            logger.info("Research plan empty or finished. No collection needed.")
+            return {"research_plan": []}
 
         current_task = plan[0]
         remaining_plan = plan[1:]
@@ -280,7 +280,7 @@ class ResearchPipeline:
         # Update state
         newly_collected = (current_task, tool_output)
         updated_collected_data = collected + [newly_collected]
-        
+
         return {
             "research_plan": remaining_plan, 
             "collected_data": updated_collected_data,
@@ -552,7 +552,7 @@ class ResearchPipeline:
             retrieved_context_str = "Context retrieval skipped (DB unavailable)."
 
         # --- Time Series Context Retrieval --- 
-        time_series_context_str = "No relevant time-series data retrieved."
+        time_series_context_lines = [] # Use a list to build the context string
         # Attempt to identify relevant tokens/protocols from collected data
         # This is a simple heuristic, could be much more sophisticated
         relevant_items = set()
@@ -566,7 +566,6 @@ class ResearchPipeline:
         
         if relevant_items:
             logger.info(f"Identified relevant items for time-series query: {relevant_items}")
-            ts_results = []
             for item_type, item_id in relevant_items:
                 measurement = None
                 tags = None
@@ -581,6 +580,7 @@ class ResearchPipeline:
                     fields = ["tvl_usd"] # Query TVL
                    
                 if measurement:
+                    query_successful = False
                     try:
                         # Query last 7 days, limit to ~100 points
                         result_dict = query_time_series_data(
@@ -590,18 +590,38 @@ class ResearchPipeline:
                             start_time="-7d", 
                             limit=100 
                         )
-                        if result_dict and 'results' in result_dict and result_dict['results']:
-                             ts_results.append({item_id: result_dict['results']})
-                             logger.debug(f"Retrieved {len(result_dict['results'])} time-series points for {item_id}")
+                        if result_dict and 'results' in result_dict:
+                            points = result_dict['results']
+                            if points:
+                                # Format points for readability
+                                time_series_context_lines.append(f"\n**{item_type.capitalize()} '{item_id}' Time Series (Last 7 Days):**")
+                                for point in points[:10]: # Limit display to first 10 points for brevity
+                                    ts = point.get('time', '')
+                                    field = point.get('field', '')
+                                    value = point.get('value', '')
+                                    time_series_context_lines.append(f"  - {ts}: {field} = {value}")
+                                if len(points) > 10:
+                                    time_series_context_lines.append(f"  ... (further {len(points)-10} points omitted)")
+                                query_successful = True 
+                                logger.debug(f"Retrieved and formatted {len(points)} time-series points for {item_id}")
+                            else:
+                                time_series_context_lines.append(f"\n- No recent time-series data found for {item_type} '{item_id}'.")
+                                query_successful = True # Query succeeded but returned no data
+                                
                         elif result_dict and 'error' in result_dict:
-                             logger.warning(f"Error retrieving time-series for {item_id}: {result_dict['error']}")
-                            
+                             error_info = result_dict['error']
+                             logger.warning(f"Error retrieving time-series for {item_id}: {error_info}")
+                             time_series_context_lines.append(f"\n- Error retrieving time-series data for {item_type} '{item_id}': {error_info}")
+                             
                     except Exception as ts_err:
-                        logger.error(f"Error querying time-series data for {item_id}: {ts_err}", exc_info=True)
+                        logger.error(f"Exception querying time-series data for {item_id}: {ts_err}", exc_info=True)
+                        time_series_context_lines.append(f"\n- Exception occurred while retrieving time-series data for {item_type} '{item_id}'.")
             
-        if ts_results:
-            # Format results for prompt (simple JSON dump for now)
-            time_series_context_str = f"Recent Time-Series Data:\n{json.dumps(ts_results, indent=2, default=str)}"
+        # Join the formatted lines
+        if time_series_context_lines:
+            time_series_context_str = "\n".join(time_series_context_lines).strip()
+        else:
+            time_series_context_str = "No relevant time-series data identified or retrieved."
         
         # --- Format Collected Data for Prompt ---
         collected_data_str = ""
@@ -685,7 +705,7 @@ class ResearchPipeline:
         }
 
     # --- Streaming Method Update ---
-    async def astream_events(self, user_query: str) -> AsyncGenerator[str, None]: # Remove user_profile param
+    async def astream_events(self, user_query: str) -> AsyncGenerator[str, None]: 
         logger.info(f"--- Starting research pipeline stream for Query: {user_query} ---")
         # Profile is now loaded by the first node
         initial_state = PipelineState(
@@ -706,8 +726,8 @@ class ResearchPipeline:
         }
         start_data_json = json.dumps(start_data_payload)
         yield f"event: start\ndata: {start_data_json}\n\n"
-        
-        config = {"recursion_limit": 50} 
+    
+        config = {"recursion_limit": 50}
         sse_event_type = "progress"
         
         try:
