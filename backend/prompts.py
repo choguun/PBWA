@@ -124,15 +124,18 @@ You will be given:
 2.  **User Profile:** (Optional) Information about the user's context (risk, goals, etc.).
     {user_profile}
 3.  **Collected Data:** A list of tuples, where each tuple contains the research task performed (e.g., "Use defi_llama_api_tool protocol='aave'") and the raw data collected for that task. Note that some data might be error messages.
-4.  **Retrieved Context:** Relevant information previously stored in the knowledge base (vector store) that matches the user query. This context might be empty if nothing relevant was found.
+4.  **Retrieved Context:** Relevant information previously stored in the knowledge base (vector store) that matches the user query.
+5.  **Time Series Context:** Relevant historical time-series data (e.g., recent price, TVL trends) retrieved from the database for entities mentioned in the query or collected data.
+    {time_series_context}
 
 **Instructions:**
 - Review the User Query and User Profile (if provided) to understand the core objective and user context.
 - Examine the Collected Data. Pay attention to both successful data retrieval and any errors encountered.
 - Examine the Retrieved Context for relevant background information or previously discovered insights.
-- Synthesize *all* the relevant information from Collected Data and Retrieved Context, interpreting it in light of the User Profile (e.g., assessing risk findings against user tolerance).
+- Examine the Time Series Context for relevant historical trends or recent performance data.
+- Synthesize *all* the relevant information from Collected Data, Retrieved Context, and Time Series Context, interpreting it in light of the User Profile (e.g., assessing risk findings against user tolerance, noting trends relevant to goals).
 - Address the User Query directly in your analysis.
-- Provide a clear, concise, and factual summary. Highlight key findings, potential risks, or discrepancies found in the data.
+- Provide a clear, concise, and factual summary. Highlight key findings, trends, potential risks, or discrepancies found in the data.
 - If significant errors occurred during data collection, mention how they might impact the analysis.
 - Do NOT invent information. Base your analysis strictly on the provided data and context.
 
@@ -144,6 +147,9 @@ You will be given:
 
 **Retrieved Context from Knowledge Base:**
 {retrieved_context}
+
+**Time Series Context:**
+{time_series_context}
 
 **Newly Collected Data:**
 {collected_data}

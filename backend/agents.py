@@ -34,6 +34,9 @@ from influxdb_client import Point
 # Import InfluxDB client and config
 from .timeseries_db import influxdb_client_instance, get_influxdb_write_api, INFLUXDB_BUCKET, INFLUXDB_ORG
 
+# Import the time-series query function directly
+from .tools.timeseries_retriever import query_time_series_data
+
 # Get a logger instance for this module
 logger = logging.getLogger(__name__)
 
@@ -94,16 +97,18 @@ class ResearchPipeline:
         self.workflow = StateGraph(PipelineState)
 
         # --- Nodes --- 
+        self.workflow.add_node("load_user_profile", self._user_profile_node)
         self.workflow.add_node("plan_research", self._plan_research_step)
         self.workflow.add_node("collect_data", self._collect_data_step)
         self.workflow.add_node("process_data", self._process_data_step) 
         self.workflow.add_node("update_vector_store", self._update_vector_store_node) 
-        self.workflow.add_node("update_timeseries_db", self._timeseries_db_update_node) # Add new node
-        self.workflow.add_node("analyze_data", self._analyze_data_step) # Now uses the implemented function
-        self.workflow.add_node("propose_strategy", self._propose_strategy_step) # Add strategy node
+        self.workflow.add_node("update_timeseries_db", self._timeseries_db_update_node)
+        self.workflow.add_node("analyze_data", self._analyze_data_step)
+        self.workflow.add_node("propose_strategy", self._propose_strategy_step)
 
         # --- Edges --- 
-        self.workflow.set_entry_point("plan_research")
+        self.workflow.set_entry_point("load_user_profile")
+        self.workflow.add_edge("load_user_profile", "plan_research")
         self.workflow.add_edge("plan_research", "collect_data")
         # Loop logic for data collection
         self.workflow.add_conditional_edges(
@@ -125,7 +130,36 @@ class ResearchPipeline:
         self.app = self.workflow.compile()
         logger.info("ResearchPipeline graph compiled.")
 
+    # --- Helper: Load User Profile --- 
+    def _load_profile(self, profile_id: str = "default_profile") -> Optional[Dict[str, Any]]:
+        """Loads user profile from a JSON file."""
+        # Simple file-based loading, could be replaced with DB lookup etc.
+        profile_path = os.path.join("user_profiles", f"{profile_id}.json")
+        logger.info(f"Attempting to load profile from: {profile_path}")
+        try:
+            with open(profile_path, 'r') as f:
+                profile_data = json.load(f)
+            logger.info(f"Successfully loaded profile for user ID: {profile_data.get('user_id', 'N/A')}")
+            return profile_data
+        except FileNotFoundError:
+            logger.warning(f"Profile file not found: {profile_path}. Proceeding without profile.")
+            return None
+        except json.JSONDecodeError:
+            logger.error(f"Error decoding JSON from profile file: {profile_path}", exc_info=True)
+            return None
+        except Exception as e:
+            logger.error(f"Error loading profile {profile_path}: {e}", exc_info=True)
+            return None
+
     # --- Node Implementations --- 
+    def _user_profile_node(self, state: PipelineState):
+        """Load the user profile into the state."""
+        logger.info("--- Loading User Profile Step ---")
+        # For now, always load the default profile. 
+        # Could be parameterized based on user ID passed in initial state if needed.
+        profile_data = self._load_profile("default_profile")
+        return {"user_profile": profile_data} # Update state with loaded profile
+    
     async def _plan_research_step(self, state: PipelineState):
         logger.info("--- Planning Research Step ---")
         user_query = state.get('user_query')
@@ -517,6 +551,58 @@ class ResearchPipeline:
             logger.warning("Skipping RAG search: Qdrant client or embedding model not available.")
             retrieved_context_str = "Context retrieval skipped (DB unavailable)."
 
+        # --- Time Series Context Retrieval --- 
+        time_series_context_str = "No relevant time-series data retrieved."
+        # Attempt to identify relevant tokens/protocols from collected data
+        # This is a simple heuristic, could be much more sophisticated
+        relevant_items = set()
+        for task, result in collected_data:
+            if task.startswith("Use coingecko_api_tool") and isinstance(result, dict) and result.get('id'):
+                relevant_items.add(("token", result['id'] ))
+            elif task.startswith("Use defi_llama_api_tool") and isinstance(result, dict):
+                 slug_match = re.search(r"protocol_slug='([^\']+)\'", task)
+                 if slug_match:
+                     relevant_items.add(("protocol", slug_match.group(1)))
+        
+        if relevant_items:
+            logger.info(f"Identified relevant items for time-series query: {relevant_items}")
+            ts_results = []
+            for item_type, item_id in relevant_items:
+                measurement = None
+                tags = None
+                fields = None
+                if item_type == "token":
+                    measurement = "token_market_data"
+                    tags = {"token_id": item_id}
+                    fields = ["price_usd", "market_cap_usd"] # Query price and market cap
+                elif item_type == "protocol":
+                    measurement = "protocol_metrics"
+                    tags = {"protocol": item_id}
+                    fields = ["tvl_usd"] # Query TVL
+                   
+                if measurement:
+                    try:
+                        # Query last 7 days, limit to ~100 points
+                        result_dict = query_time_series_data(
+                            measurement=measurement, 
+                            tags=tags, 
+                            fields=fields, 
+                            start_time="-7d", 
+                            limit=100 
+                        )
+                        if result_dict and 'results' in result_dict and result_dict['results']:
+                             ts_results.append({item_id: result_dict['results']})
+                             logger.debug(f"Retrieved {len(result_dict['results'])} time-series points for {item_id}")
+                        elif result_dict and 'error' in result_dict:
+                             logger.warning(f"Error retrieving time-series for {item_id}: {result_dict['error']}")
+                            
+                    except Exception as ts_err:
+                        logger.error(f"Error querying time-series data for {item_id}: {ts_err}", exc_info=True)
+            
+        if ts_results:
+            # Format results for prompt (simple JSON dump for now)
+            time_series_context_str = f"Recent Time-Series Data:\n{json.dumps(ts_results, indent=2, default=str)}"
+        
         # --- Format Collected Data for Prompt ---
         collected_data_str = ""
         if collected_data:
@@ -544,8 +630,9 @@ class ResearchPipeline:
         try:
             analysis_results = await self.analyzer.ainvoke({
                 "user_query": user_query,
-                "user_profile": user_profile_str, # Pass profile to analyzer
+                "user_profile": user_profile_str,
                 "retrieved_context": retrieved_context_str,
+                "time_series_context": time_series_context_str, # Add time_series_context
                 "collected_data": collected_data_str
             })
             logger.info("Analysis generated successfully.")
@@ -598,18 +685,12 @@ class ResearchPipeline:
         }
 
     # --- Streaming Method Update ---
-    async def astream_events(self, user_query: str, user_profile: Optional[Dict[str, Any]] = None) -> AsyncGenerator[str, None]: # Add user_profile param
+    async def astream_events(self, user_query: str) -> AsyncGenerator[str, None]: # Remove user_profile param
         logger.info(f"--- Starting research pipeline stream for Query: {user_query} ---")
-        # TODO: Implement actual loading/fetching of user profile if not passed directly
-        if user_profile:
-             logger.info(f"Using provided User Profile: {list(user_profile.keys())}")
-        else:
-             logger.info("No user profile provided, proceeding without personalization.")
-             # Optionally load a default or guest profile here
-
+        # Profile is now loaded by the first node
         initial_state = PipelineState(
-            user_profile=user_profile, # Use passed or loaded profile
-            user_query=user_query,
+            user_profile=None, # Will be loaded by the first node
+            user_query=user_query, # Pass the query
             research_plan=None,
             collected_data=[],
             processed_data={},
@@ -619,17 +700,15 @@ class ResearchPipeline:
             error_log=[],
         )
         
-        # --- Create start event data payload separately --- 
+        # Create start event data payload (no profile keys needed here anymore)
         start_data_payload = {
             'input': user_query,
-            'profile_keys': list(user_profile.keys()) if user_profile else []
         }
         start_data_json = json.dumps(start_data_payload)
-        # Yield the correctly formatted SSE string
         yield f"event: start\ndata: {start_data_json}\n\n"
         
         config = {"recursion_limit": 50} 
-        sse_event_type = "progress" # Default event type
+        sse_event_type = "progress"
         
         try:
             async for event in self.app.astream(initial_state, config=config):
@@ -637,8 +716,8 @@ class ResearchPipeline:
                 node_name = list(event.keys())[0]
                 node_output = event[node_name]
                 
-                sse_data = {} # Default empty data
-                sse_event_type = None # Reset event type
+                sse_data = {} 
+                sse_event_type = None
                 
                 # --- Map node outputs to SSE events --- 
                 if node_name == "plan_research":
