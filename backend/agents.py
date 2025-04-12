@@ -1,14 +1,18 @@
 from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableConfig # Import RunnableConfig
+from langchain_core.output_parsers.string import StrOutputParser # Import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 import logging
+import json # Import json for formatting streamed data
+from typing import AsyncGenerator # Import AsyncGenerator
 
 from .config import GOOGLE_API_KEY, LLM_MODEL
 from .tools import portfolio_retriever, agent_tools
 from .prompts import PLANNER_PROMPT, EXECUTOR_PROMPT, REPLANNER_PROMPT
-from .schemas import Plan, PlanExecute, Act, Response
+from .schemas import Plan, PlanExecute, ReplannerOutput 
 
 # Get a logger instance for this module
 logger = logging.getLogger(__name__)
@@ -48,7 +52,7 @@ class MultiStepAgent:
 
         # --- Chains ---
         self.planner = self.planner_prompt | self.llm.with_structured_output(Plan)
-        self.replanner = self.replanner_prompt | self.llm.with_structured_output(Act)
+        self.replanner = self.replanner_prompt | self.llm.with_structured_output(ReplannerOutput)
 
         # --- Workflow Definition ---
         self.workflow = StateGraph(PlanExecute)
@@ -94,16 +98,17 @@ class MultiStepAgent:
         task = plan[0]
         step_number = len(state.get("past_steps", [])) + 1
         logger.info(f"--- Executing Step {step_number}: {task} ---")
-        plan_str = "\n".join(f"{i+1}. {step}" for i, step in enumerate(state["plan"]))
-        task_formatted = f""""For the following plan: {plan_str}
-
-You are tasked with executing step {step_number}, {task}."""
-
+        
         try:
-            logger.debug(f"Agent Executor Input Messages: {[('user', task_formatted)]}")
-            agent_response = await self.agent_executor.ainvoke({"messages": [("user", task_formatted)]})
+            # Pass only the current task to the agent executor
+            agent_executor_input = {"messages": [("user", task)]}
+            logger.debug(f"Agent Executor Input: {agent_executor_input}")
+            
+            agent_response = await self.agent_executor.ainvoke(agent_executor_input)
+            
             logger.debug(f"Agent Executor Raw Response: {agent_response}")
 
+            # Extract direct tool output (same logic as before)
             if 'output' in agent_response:
                 tool_output = agent_response['output']
                 logger.info(f"Extracted Tool Output for Step {step_number}: {tool_output}")
@@ -132,33 +137,114 @@ You are tasked with executing step {step_number}, {task}."""
         all_steps = "\n".join([f"{step}: {response}" for step, response in state["past_steps"]])
         context = f"Input Query: {state['input']}\n\nInfo from previous steps:\n{all_steps}\n\nDirect tool responses:\n{all_responses}"
         logger.info(f"Replanner Context:\n{context}")
-
+        
         try:
-            output = await self.replanner.ainvoke({**state, "input": context})
-            logger.debug(f"Replanner Raw Output: {output}")
+            # Get structured output matching the new ReplannerOutput model
+            output: ReplannerOutput = await self.replanner.ainvoke({**state, "input": context})
+            logger.info(f"Replanner LLM structured output (ReplannerOutput object): {output}")
 
-            if output.response:
-                cleaned_response = clean_newlines(output.response.response)
+            # Parse the ReplannerOutput object
+            if output and output.final_answer:
+                cleaned_response = clean_newlines(output.final_answer)
                 logger.info(f"Replanner decided on Final Response: {cleaned_response}")
                 return {"response": cleaned_response}
-            elif output.plan:
-                logger.info(f"Replanner decided on New Plan Steps: {output.plan.steps}")
-                # Reset intermediate responses when creating a new plan?
-                return {"plan": output.plan.steps, "intermediate_responses": state.get("intermediate_responses", [])} # Keep past responses?
+            
+            elif output and output.plan and output.plan.steps:
+                new_steps = output.plan.steps
+                logger.info(f"Replanner decided on New Plan Steps: {new_steps}")
+                return {"plan": new_steps}
+            
             else:
-                logger.warning("Replanner returned neither response nor plan.")
-                return {"response": "Replanning resulted in no further action."}
+                # Handle cases where structured output failed or LLM didn't provide response/plan
+                logger.warning(f"Replanner returned ReplannerOutput object without final_answer or plan.steps. Output: {output}")
+                return {"response": "Agent could not determine a final response or next step after replanning."}
+
         except Exception as e:
-            logger.error(f"Error during replanning: {e}", exc_info=True)
-            # Decide how to handle replan errors, maybe return a final error message
-            return {"response": f"An error occurred during the replanning phase: {e}"}
+             logger.error(f"Error during replanning LLM call or structured output parsing: {e}", exc_info=True)
+             return {"response": f"An error occurred during the replanning phase: {e}"} 
 
     def _should_end(self, state: PlanExecute):
         logger.debug(f"Checking should_end: response in state = {'response' in state and state['response'] is not None}")
         return END if "response" in state and state["response"] is not None else "agent"
 
+    # --- NEW: Streaming method --- 
+    async def astream_events(self, user_input: str) -> AsyncGenerator[str, None]:
+        """Runs the agent workflow and yields Server-Sent Events for each step."""
+        logger.info(f"--- Starting agent stream for Input: {user_input} ---")
+        # Use triple quotes for multiline f-string
+        yield f"""event: start
+data: {json.dumps({'input': user_input})}\n\n""" 
+        
+        config = {"recursion_limit": 50}
+        last_event_for_error = None
+        final_response_yielded = False
+
+        try:
+            async for event in self.app.astream(
+                {"input": user_input, "plan": [], "past_steps": [], "response": None, "intermediate_responses": []},
+                config=config,
+            ):
+                last_event_for_error = event # Keep track for error reporting
+                logger.debug(f"Workflow Event: {event}")
+
+                # Determine the event type based on the node that produced it
+                if "planner" in event:
+                    plan_steps = event["planner"].get("plan", [])
+                    event_data = {"type": "plan", "steps": plan_steps}
+                    # Use triple quotes for multiline f-string
+                    yield f"""event: plan\ndata: {json.dumps(event_data)}\n\n"""
+                
+                elif "agent" in event: # Corresponds to _execute_step output
+                    agent_data = event["agent"]
+                    past_steps = agent_data.get("past_steps")
+                    if past_steps:
+                        last_task, last_result = past_steps[-1]
+                        event_data = {"type": "tool_result", "task": last_task, "result": last_result}
+                        # Use triple quotes for multiline f-string
+                        yield f"""event: tool_result\ndata: {json.dumps(event_data)}\n\n"""
+
+                elif "replan" in event:
+                    replan_data = event["replan"]
+                    if "response" in replan_data and replan_data["response"]:
+                        final_response = replan_data["response"]
+                        event_data = {"type": "final_response", "response": final_response}
+                        # Use triple quotes for multiline f-string
+                        yield f"""event: final_response\ndata: {json.dumps(event_data)}\n\n"""
+                        final_response_yielded = True # Mark as yielded
+                    elif "plan" in replan_data and replan_data["plan"]:
+                        new_plan_steps = replan_data["plan"]
+                        event_data = {"type": "new_plan", "steps": new_plan_steps}
+                        # Use triple quotes for multiline f-string
+                        yield f"""event: new_plan\ndata: {json.dumps(event_data)}\n\n"""
+                    else: pass 
+
+                elif END in event:
+                    if not final_response_yielded and isinstance(event[END], dict) and "response" in event[END]:
+                        final_response = event[END]["response"]
+                        event_data = {"type": "final_response", "response": final_response}
+                        # Use triple quotes for multiline f-string
+                        yield f"""event: final_response\ndata: {json.dumps(event_data)}\n\n"""
+                        final_response_yielded = True
+                    logger.info("Workflow reached END state.")
+
+        except Exception as e:
+            logger.error(f"Exception during agent workflow stream: {e}", exc_info=True)
+            logger.error(f"Last event before exception: {last_event_for_error}")
+            error_data = {"type": "error", "message": str(e)}
+            # Use triple quotes for multiline f-string
+            yield f"""event: error\ndata: {json.dumps(error_data)}\n\n"""
+        finally:
+            logger.info(f"--- Agent stream finished for Input: {user_input} ---")
+            # Use triple quotes for multiline f-string
+            yield f"""event: end\ndata: {json.dumps({'message': 'Stream ended.'})}\n\n""" 
+            
+
+    # --- arun method (keep for non-streaming use cases or remove if unused) ---
     async def arun(self, user_input: str):
-        logger.info(f"--- Starting agent run for Input: {user_input} ---")
+         # ... (existing arun implementation) ...
+         # This method now exists alongside astream_events
+         # It iterates through the stream internally but only returns the final result.
+        logger.info(f"--- [arun] Starting agent run for Input: {user_input} ---")
         config = {"recursion_limit": 50}
         final_state = None
         last_event = None
@@ -168,26 +254,26 @@ You are tasked with executing step {step_number}, {task}."""
                 config=config,
             ):
                 last_event = event # Keep track of the last event for error reporting
-                logger.debug(f"Workflow Event: {event}")
+                logger.debug(f"[arun] Workflow Event: {event}")
                 if END in event:
                     final_state = event[END]
-                    logger.info("Workflow reached END state.")
+                    logger.info("[arun] Workflow reached END state.")
         except Exception as e:
-            logger.error(f"Exception during agent workflow execution: {e}", exc_info=True)
-            logger.error(f"Last event before exception: {last_event}")
-            return f"An error occurred during agent execution: {e}"
+             logger.error(f"[arun] Exception during agent workflow execution: {e}", exc_info=True)
+             logger.error(f"[arun] Last event before exception: {last_event}")
+             return f"An error occurred during agent execution: {e}"
+
 
         if final_state and "response" in final_state:
-            logger.info(f"--- Agent run finished. Final Response: {final_state['response']} ---")
-            return final_state["response"]
+            logger.info(f"--- [arun] Agent run finished. Final Response: {final_state['response']} ---")
+            return final_state['response']
         else:
-            logger.warning(f"Agent finished without a final response state. Last event: {last_event}")
-            # Try to extract info from the last event if possible
+            logger.warning(f"[arun] Agent finished without a final response state. Last event: {last_event}")
             last_state_info = "Unknown state"
             if last_event:
                 try:
-                    last_state_info = str(list(last_event.values())[0])
+                     last_state_info = str(list(last_event.values())[0])
                 except Exception:
-                    pass
-            logger.warning(f"Last state info: {last_state_info}")
-            return "Agent finished unexpectedly without providing a final response." # Or raise an error
+                    pass 
+            logger.warning(f"[arun] Last state info: {last_state_info}")
+            return "Agent finished unexpectedly without providing a final response."
