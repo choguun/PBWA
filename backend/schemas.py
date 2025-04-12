@@ -29,3 +29,7 @@ class Act(BaseModel):
     """Action to perform (for replanning)."""
     response: Optional[Response] = None
     plan: Optional[Plan] = None
+
+class SendEthInput(BaseModel):
+    to_address: str = Field(description="The recipient Ethereum address.")
+    amount_eth: float = Field(description="The amount of ETH to send.")
