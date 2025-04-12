@@ -81,6 +81,13 @@ class TimeSeriesInput(BaseModel):
 class VfatInput(BaseModel):
     farm_url: str = Field(..., description="The specific URL of the vfat.tools farm page to scrape.")
 
+# --- Analysis Result Schema ---
+class AnalysisResult(BaseModel):
+    is_sufficient: bool = Field(..., description="Whether the gathered data (collected, vector store, time-series) was sufficient to comprehensively answer the original user query.")
+    analysis_text: str = Field(..., description="The detailed analysis synthesizing all available information.")
+    reasoning: Optional[str] = Field(None, description="Brief explanation for why the data is sufficient or insufficient.")
+    suggestions_for_next_steps: Optional[str] = Field(None, description="If insufficient, suggested next steps or missing information needed for a better analysis (used for replanning)." )
+
 # --- Request/Response Schemas ---
 # Remove unused QueryRequest and QueryResponse
 

@@ -24,7 +24,7 @@ from .prompts import (
     ANALYZER_PROMPT,
     STRATEGIST_PROMPT # Import STRATEGIST_PROMPT
 )
-from .schemas import Plan, ReplannerOutput, PipelineState
+from .schemas import Plan, ReplannerOutput, PipelineState, AnalysisResult
 from .vector_store import qdrant_client_instance, embedding_model_instance # Import DB clients
 from qdrant_client.http.models import PointStruct # Import PointStruct for upsert
 
@@ -88,9 +88,7 @@ class ResearchPipeline:
         # --- Chains ---
         self.planner = self.planner_prompt | self.llm.with_structured_output(Plan)
         self.replanner = self.replanner_prompt | self.llm.with_structured_output(ReplannerOutput)
-        # --- New Analyzer Chain ---
-        self.analyzer = self.analyzer_prompt | self.llm | StrOutputParser()
-        # --- New Strategist Chain ---
+        self.analyzer = self.analyzer_prompt | self.llm.with_structured_output(AnalysisResult)
         self.strategist = self.strategist_prompt | self.llm | StrOutputParser()
 
         # --- Workflow Definition ---
@@ -100,6 +98,7 @@ class ResearchPipeline:
         self.workflow.add_node("load_user_profile", self._user_profile_node)
         self.workflow.add_node("plan_research", self._plan_research_step)
         self.workflow.add_node("collect_data", self._collect_data_step)
+        self.workflow.add_node("replan_step", self._replan_step)
         self.workflow.add_node("process_data", self._process_data_step) 
         self.workflow.add_node("update_vector_store", self._update_vector_store_node) 
         self.workflow.add_node("update_timeseries_db", self._timeseries_db_update_node)
@@ -110,20 +109,28 @@ class ResearchPipeline:
         self.workflow.set_entry_point("load_user_profile")
         self.workflow.add_edge("load_user_profile", "plan_research")
         self.workflow.add_edge("plan_research", "collect_data")
-        # Loop logic for data collection
         self.workflow.add_conditional_edges(
             "collect_data",
-            self._should_continue_or_process, # Renamed check function
-            {"continue": "collect_data", "process": "process_data"} 
+            self._should_replan_or_continue_or_process,
+            {
+                "replan": "replan_step",
+                "continue": "collect_data",
+                "process": "process_data"
+            }
         )
-        # Processing and storage flow
+        self.workflow.add_edge("replan_step", "collect_data")
         self.workflow.add_edge("process_data", "update_vector_store")
         self.workflow.add_edge("process_data", "update_timeseries_db")
-        # Both storage nodes now lead to analysis
         self.workflow.add_edge("update_vector_store", "analyze_data") 
         self.workflow.add_edge("update_timeseries_db", "analyze_data")
-        # --- Updated Edges: Analysis -> Strategy -> End ---
-        self.workflow.add_edge("analyze_data", "propose_strategy") 
+        self.workflow.add_conditional_edges(
+            "analyze_data",
+            self._should_propose_strategy_or_replan,
+            {
+                "propose_strategy": "propose_strategy",
+                "replan": "replan_step"
+            }
+        )
         self.workflow.add_edge("propose_strategy", END) 
         
         # Compile the graph
@@ -306,15 +313,26 @@ class ResearchPipeline:
             "error_log": errors
         }
 
-    def _should_continue_or_process(self, state: PipelineState):
-        # Continue collecting if plan is not empty, otherwise move to process
-        if state.get("research_plan"):
-            logger.info("Plan has remaining steps, continuing collection.")
+    def _should_replan_or_continue_or_process(self, state: PipelineState):
+        logger.debug("Checking state for replan/continue/process decision...")
+        plan = state.get("research_plan")
+        collected = state.get("collected_data", [])
+        
+        # Check the result of the *last* collection step for an error
+        if collected:
+            last_task, last_result = collected[-1]
+            if isinstance(last_result, dict) and 'error' in last_result:
+                logger.warning(f"Error detected in last step ('{last_task}'): {last_result['error']}. Triggering replan.")
+                return "replan"
+        
+        # If no error in last step, check if plan exists
+        if plan:
+            logger.info("No error in last step and plan has remaining steps, continuing collection.")
             return "continue"
         else:
-            logger.info("Plan finished, moving to process data.")
+            logger.info("No error in last step and plan finished, moving to process data.")
             return "process"
-    
+
     def _process_data_step(self, state: PipelineState):
         logger.info("--- Processing Collected Data --- ")
         collected_data = state.get("collected_data", [])
@@ -599,42 +617,85 @@ class ResearchPipeline:
                    
                 if measurement:
                     query_successful = False
+                    error_info = None # Store potential error message
+                    processed_results = [] # Store processed results for this item
+                    
                     try:
-                        # Query last 7 days, limit to ~100 points
                         result_dict = query_time_series_data(
                             measurement=measurement, 
                             tags=tags, 
                             fields=fields, 
                             start_time="-7d", 
-                            limit=100 
+                            limit=500 # Increase limit slightly for better change calc
                         )
                         if result_dict and 'results' in result_dict:
-                            points = result_dict['results']
-                            if points:
-                                # Format points for readability
-                                time_series_context_lines.append(f"\n**{item_type.capitalize()} '{item_id}' Time Series (Last 7 Days):**")
-                                for point in points[:10]: # Limit display to first 10 points for brevity
-                                    ts = point.get('time', '')
-                                    field = point.get('field', '')
-                                    value = point.get('value', '')
-                                    time_series_context_lines.append(f"  - {ts}: {field} = {value}")
-                                if len(points) > 10:
-                                    time_series_context_lines.append(f"  ... (further {len(points)-10} points omitted)")
-                                query_successful = True 
-                                logger.debug(f"Retrieved and formatted {len(points)} time-series points for {item_id}")
-                            else:
-                                time_series_context_lines.append(f"\n- No recent time-series data found for {item_type} '{item_id}'.")
-                                query_successful = True # Query succeeded but returned no data
-                                
+                            points = sorted(result_dict['results'], key=lambda p: p.get('time', '')) # Sort by time ascending
+                            processed_results = points # Store for later processing
+                            query_successful = True
                         elif result_dict and 'error' in result_dict:
                              error_info = result_dict['error']
                              logger.warning(f"Error retrieving time-series for {item_id}: {error_info}")
-                             time_series_context_lines.append(f"\n- Error retrieving time-series data for {item_type} '{item_id}': {error_info}")
+                        else:
+                            # Query succeeded but returned no data
+                            query_successful = True 
                              
                     except Exception as ts_err:
                         logger.error(f"Exception querying time-series data for {item_id}: {ts_err}", exc_info=True)
-                        time_series_context_lines.append(f"\n- Exception occurred while retrieving time-series data for {item_type} '{item_id}'.")
-            
+                        error_info = f"Exception occurred during query: {ts_err}"
+
+                    # --- Format the results for the prompt --- 
+                    time_series_context_lines.append(f"\n**{item_type.capitalize()} '{item_id}' Time Series (Last 7 Days):**")
+                    if error_info:
+                        time_series_context_lines.append(f"  - ERROR retrieving data: {error_info}")
+                    elif not processed_results:
+                        time_series_context_lines.append(f"  - No recent data found.")
+                    else:
+                        # Calculate stats and format
+                        try:
+                            # Group points by field
+                            points_by_field = {}
+                            for p in processed_results:
+                                field = p.get('field')
+                                if field:
+                                    if field not in points_by_field:
+                                        points_by_field[field] = []
+                                    points_by_field[field].append(p)
+                            
+                            for field, field_points in points_by_field.items():
+                                if len(field_points) > 1:
+                                    start_point = field_points[0]
+                                    end_point = field_points[-1]
+                                    start_val = start_point.get('value')
+                                    end_val = end_point.get('value')
+                                    start_time_str = start_point.get('time', '').split('T')[0] # Just date
+                                    end_time_str = end_point.get('time', '').split('T')[0]
+                                    
+                                    change_str = "N/A"
+                                    if isinstance(start_val, (int, float)) and isinstance(end_val, (int, float)) and start_val != 0:
+                                        change_pct = ((end_val - start_val) / start_val) * 100
+                                        change_str = f"{change_pct:+.2f}%"
+                                    
+                                    time_series_context_lines.append(f"  - {field}: Start ({start_time_str}) = {start_val}, End ({end_time_str}) = {end_val}, Change (7d) = {change_str}")
+                                elif len(field_points) == 1:
+                                     point = field_points[0]
+                                     time_str = point.get('time', '').split('T')[0]
+                                     time_series_context_lines.append(f"  - {field}: Single point ({time_str}) = {point.get('value')}")
+                                else:
+                                     time_series_context_lines.append(f"  - {field}: No data points found.")
+
+                            # Optionally add a few raw points for context
+                            if len(processed_results) > 0:
+                                time_series_context_lines.append(f"    (Recent raw points sample):")
+                                for point in processed_results[-3:]: # Last 3 points
+                                    ts = point.get('time', '')
+                                    field = point.get('field', '')
+                                    value = point.get('value', '')
+                                    time_series_context_lines.append(f"      - {ts}: {field} = {value}")
+                                    
+                        except Exception as fmt_err:
+                            logger.error(f"Error formatting time-series stats for {item_id}: {fmt_err}", exc_info=True)
+                            time_series_context_lines.append(f"  - Error processing time-series data for display.")
+
         # Join the formatted lines
         if time_series_context_lines:
             time_series_context_str = "\n".join(time_series_context_lines).strip()
@@ -646,14 +707,20 @@ class ResearchPipeline:
         if collected_data:
             formatted_items = []
             for task, result in collected_data:
-                 result_preview = str(result)[:300] # Limit length
-                 ellipsis = "..." if len(str(result)) > 300 else ""
-                 # Construct string parts separately, avoid complex f-string with newline
-                 task_line = f"- Task: {task}"
-                 result_line = f"  Result: {result_preview}{ellipsis}"
-                 # Combine parts for this item
-                 item_str = f"{task_line}\n{result_line}" 
-                 formatted_items.append(item_str)
+                # Check if the result is a structured error
+                if isinstance(result, dict) and 'error' in result:
+                    error_message = result['error']
+                    # Format error clearly
+                    item_str = f"- Task: {task}\n  Result: ERROR - {error_message}"
+                    formatted_items.append(item_str)
+                else:
+                    # Format successful result (with truncation)
+                    result_preview = str(result)[:300] # Limit length
+                    ellipsis = "..." if len(str(result)) > 300 else ""
+                    task_line = f"- Task: {task}"
+                    result_line = f"  Result: {result_preview}{ellipsis}"
+                    item_str = f"{task_line}\n{result_line}"
+                    formatted_items.append(item_str)
             # Join all items with newlines
             collected_data_str = "\n".join(formatted_items)
         else:
@@ -664,50 +731,77 @@ class ResearchPipeline:
             
         # --- Invoke Analyzer LLM ---
         logger.info("Invoking Analyzer LLM...")
-        analysis_results = "Analysis failed."
+        analysis_result_obj: Optional[AnalysisResult] = None # Initialize as None
         try:
-            analysis_results = await self.analyzer.ainvoke({
+            # Call analyzer with structured output
+            analysis_result_obj = await self.analyzer.ainvoke({
                 "user_query": user_query,
                 "user_profile": user_profile_str,
                 "retrieved_context": retrieved_context_str,
-                "time_series_context": time_series_context_str, # Add time_series_context
+                "time_series_context": time_series_context_str,
                 "collected_data": collected_data_str
             })
-            logger.info("Analysis generated successfully.")
-            logger.debug(f"Analysis Result Snippet: {analysis_results[:200]}...")
+            logger.info("Analysis generated successfully. Sufficiency: {analysis_result_obj.is_sufficient}")
+            logger.debug(f"Analysis Result Text Snippet: {analysis_result_obj.analysis_text[:200]}...")
         except Exception as e:
             error_msg = f"Error during LLM Analysis step: {e}"
             logger.error(error_msg, exc_info=True)
             errors.append(error_msg)
-            analysis_results = f"Error generating analysis: {e}"
+            # Store error indicator in state? For now, just log and proceed (will likely fail sufficiency check)
+            analysis_result_obj = AnalysisResult(is_sufficient=False, analysis_text=f"Error during analysis: {e}", reasoning="LLM call failed")
         
+        # Return the structured analysis object
         return {
-            "analysis_results": analysis_results,
-            "error_log": errors # Pass on any accumulated errors
+            "analysis_results": analysis_result_obj,
+            "error_log": errors
         }
 
-    # --- New Strategy Proposal Node --- 
+    # --- New Conditional Logic Post-Analysis ---
+    def _should_propose_strategy_or_replan(self, state: PipelineState):
+        """Decides whether to propose strategy or replan based on analysis sufficiency."""
+        logger.debug("Checking analysis result for sufficiency...")
+        analysis_result_obj = state.get('analysis_results')
+        
+        if analysis_result_obj and isinstance(analysis_result_obj, AnalysisResult):
+            if analysis_result_obj.is_sufficient:
+                logger.info("Analysis deemed sufficient. Proceeding to propose strategy.")
+                return "propose_strategy"
+            else:
+                logger.warning(f"Analysis deemed insufficient. Triggering replan. Reason: {analysis_result_obj.reasoning}")
+                return "replan"
+        else:
+            # Should not happen if analysis step ran, but default to replan if result is missing/invalid
+            logger.error("Analysis result object missing or invalid in state. Triggering replan as failsafe.")
+            return "replan"
+
     async def _propose_strategy_step(self, state: PipelineState):
         logger.info("--- Proposing Strategy ---")
         user_query = state.get('user_query')
         user_profile = state.get('user_profile') # Optional
-        analysis_results = state.get('analysis_results')
+        analysis_result_obj = state.get('analysis_results')
         errors = state.get('error_log', [])
 
-        if not analysis_results:
+        if not analysis_result_obj:
             logger.error("Strategy step failed: Analysis results are missing.")
             return {"error_log": errors + ["Strategy proposal failed: Missing analysis results."]}
 
         # Format user profile for prompt (if available)
         user_profile_str = json.dumps(user_profile, indent=2) if user_profile else "Not Provided"
 
+        # Extract the text part for the strategist prompt
+        analysis_text = analysis_result_obj.analysis_text if analysis_result_obj and isinstance(analysis_result_obj, AnalysisResult) else "Analysis results unavailable."
+        
+        if not analysis_result_obj or not analysis_result_obj.is_sufficient: # Double check sufficiency?
+            logger.error("Strategy step called but analysis was insufficient or missing.")
+            return {"error_log": errors + ["Strategy proposal failed: Analysis missing or insufficient."]}
+        
         logger.info("Invoking Strategist LLM...")
         strategy_proposals = "Strategy proposal failed."
         try:
             strategy_proposals = await self.strategist.ainvoke({
                 "user_query": user_query or "Not Provided",
                 "user_profile": user_profile_str,
-                "analysis_results": analysis_results
+                "analysis_results": analysis_text # Pass only the text
             })
             logger.info("Strategy proposals generated successfully.")
             logger.debug(f"Strategy Proposals Snippet: {strategy_proposals[:200]}...")
@@ -721,6 +815,58 @@ class ResearchPipeline:
             "strategy_proposals": strategy_proposals,
             "error_log": errors # Pass on any accumulated errors
         }
+
+    # --- Updated Replan Node --- 
+    async def _replan_step(self, state: PipelineState):
+        """Invokes the replanner LLM based on the current state, including errors or analysis feedback."""
+        logger.info("--- Replanning Step ---")
+        user_query = state.get('user_query')
+        plan = state.get("research_plan")
+        collected = state.get("collected_data", [])
+        errors = state.get('error_log', [])
+        
+        analysis_result_obj = state.get('analysis_results') # Get potential analysis result object
+
+        # Format collected data including errors for the replanner prompt
+        formatted_steps = []
+        for task, result in collected:
+            if isinstance(result, dict) and 'error' in result:
+                formatted_steps.append(f"Step: {task}\nOutcome: FAILED - {result['error']}")
+            else:
+                # Keep successful results brief for replanner context
+                result_preview = str(result)[:150] 
+                ellipsis = "..." if len(str(result)) > 150 else ""
+                formatted_steps.append(f"Step: {task}\nOutcome: Success - Result Preview: {result_preview}{ellipsis}")
+        intermediate_steps_str = "\n\n".join(formatted_steps)
+
+        # --- Add context from analysis if replanning was triggered post-analysis ---
+        analysis_context = "No analysis performed yet or analysis was sufficient."
+        if analysis_result_obj and isinstance(analysis_result_obj, AnalysisResult) and not analysis_result_obj.is_sufficient:
+            analysis_context = f"Analysis found data insufficient.\nReason: {analysis_result_obj.reasoning}\nSuggestions: {analysis_result_obj.suggestions_for_next_steps}"
+
+        logger.debug(f"Calling replanner. Context:\nQuery: {user_query}\nPlan: {plan}\nAnalysis Context: {analysis_context}\nHistory: {intermediate_steps_str[:500]}...")
+        try:
+            replanner_output: ReplannerOutput = await self.replanner.ainvoke({
+                "input": user_query,
+                "plan": plan,
+                "analysis_context": analysis_context, # Pass analysis context
+                "intermediate_steps": intermediate_steps_str
+            })
+            
+            if replanner_output.replan and replanner_output.new_plan is not None:
+                logger.info(f"Replanner generated a new plan: {replanner_output.new_plan}")
+                # Clear previous analysis result if replanning happens
+                return {"research_plan": replanner_output.new_plan, "analysis_results": None, "error_log": errors + ["Replanning triggered."]}
+            else:
+                logger.info("Replanner decided not to change the plan. Continuing with existing plan (if any).")
+                return {"research_plan": plan, "error_log": errors} # Keep existing plan
+                
+        except Exception as e:
+            error_msg = f"Error during replanning step: {e}"
+            logger.error(error_msg, exc_info=True)
+            # If replanning fails, maybe just keep the original plan or halt?
+            # For now, keep original plan and log error.
+            return {"research_plan": plan, "error_log": errors + [error_msg]}
 
     # --- Streaming Method Update ---
     async def astream_events(self, user_query: str) -> AsyncGenerator[str, None]: 
@@ -758,7 +904,10 @@ class ResearchPipeline:
                 sse_event_type = None
                 
                 # --- Map node outputs to SSE events --- 
-                if node_name == "plan_research":
+                if node_name == "load_user_profile":
+                    # Optional: Add event for profile loading
+                    pass 
+                elif node_name == "plan_research":
                     sse_event_type = "plan"
                     sse_data = {"type": "plan", "steps": node_output.get("research_plan", [])}
                 elif node_name == "collect_data":
@@ -777,15 +926,29 @@ class ResearchPipeline:
                     sse_data = {"type": "storage_ts", "message": node_output.get("current_step_output", "Time-series update completed.")}
                 elif node_name == "analyze_data":
                     sse_event_type = "analysis"
-                    sse_data = {"type": "analysis", "result": node_output.get("analysis_results")}
+                    analysis_obj = node_output.get("analysis_results")
+                    # Send the full analysis object or just the text?
+                    # Sending text for primary display, maybe add sufficiency flag?
+                    analysis_text = analysis_obj.analysis_text if analysis_obj and isinstance(analysis_obj, AnalysisResult) else "Analysis error or missing."
+                    is_sufficient = analysis_obj.is_sufficient if analysis_obj and isinstance(analysis_obj, AnalysisResult) else False
+                    sse_data = {"type": "analysis", "result": analysis_text, "is_sufficient": is_sufficient}
                 # --- Handle Strategy Node --- 
                 elif node_name == "propose_strategy":
                     sse_event_type = "strategy"
                     sse_data = {"type": "strategy", "proposals": node_output.get("strategy_proposals")}
+                # --- Handle Replanning Step --- 
+                elif node_name == "replan_step":
+                    sse_event_type = "replan"
+                    new_plan = node_output.get("research_plan")
+                    if new_plan: # Check if replan actually occurred
+                        sse_data = {"type": "replan", "message": "Replanning due to error...", "new_plan": new_plan}
+                    else: # Replanner decided not to change plan
+                         sse_data = {"type": "replan", "message": "Replanner checked, continuing plan."}
+                         sse_event_type = None # Don't send SSE if no actual replan occurred
                 # --- Handle End Node --- 
                 elif node_name == END:
                      sse_event_type = "end"
-                     # Use strategy_proposals as the final response now
+                     # Final response is still strategy proposals if reached
                      final_resp = node_output.get("strategy_proposals", "Pipeline finished.") 
                      sse_data = {"type": "final_response", "response": final_resp}
 

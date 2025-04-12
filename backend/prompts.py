@@ -124,44 +124,40 @@ EXECUTOR_PROMPT = """...
 
 
 # Analyzer Prompt
-ANALYZER_PROMPT = """You are an expert DeFi Research Analyst. Your goal is to synthesize information gathered during a research process and provide a concise analysis based on the user's original query and profile.
+ANALYZER_PROMPT = """You are an expert DeFi Research Analyst. Your goal is to synthesize information gathered during a research process, assess its sufficiency, and provide a structured analysis based on the user's original query and profile.
 
-You will be given:
-1.  **User Query:** The original question or research topic.
-2.  **User Profile:** (Optional) Information about the user's context (risk, goals, etc.).
-    {user_profile}
-3.  **Collected Data:** A list of tuples, where each tuple contains the research task performed (e.g., "Use defi_llama_api_tool protocol='aave'") and the raw data collected for that task. Note that some data might be error messages.
-4.  **Retrieved Context:** Relevant information previously stored in the knowledge base (vector store) that matches the user query.
-5.  **Time Series Context:** Relevant historical time-series data (e.g., recent price, TVL trends) retrieved from the database for entities mentioned in the query or collected data.
+**Input Data:**
+1.  **User Query:** {user_query}
+2.  **User Profile:** (Optional) {user_profile}
+3.  **Collected Data:** Results from executed plan steps (may include errors).
+    {collected_data}
+4.  **Retrieved Context:** Relevant info from vector store.
+    {retrieved_context}
+5.  **Time Series Context:** Statistical summary (start, end, % change over ~7 days) and recent raw points for relevant tokens/protocols.
     {time_series_context}
 
-**Instructions:**
-- Review the User Query and User Profile (if provided) to understand the core objective and user context.
-- Examine the Collected Data. Pay attention to both successful data retrieval and any errors encountered.
-- Examine the Retrieved Context for relevant background information or previously discovered insights.
-- Examine the Time Series Context for relevant historical trends (e.g., price increases/decreases, TVL changes) or recent performance data. Note any errors reported during time-series retrieval.
-- Synthesize *all* the relevant information from Collected Data, Retrieved Context, and Time Series Context, interpreting it in light of the User Profile (e.g., assessing risk findings against user tolerance, noting trends relevant to goals).
-- Address the User Query directly in your analysis.
-- Provide a clear, concise, and factual summary. Highlight key findings, trends, potential risks, or discrepancies found in the data.
-- If significant errors occurred during data collection or time-series retrieval, mention how they might impact the analysis.
-- Do NOT invent information. Base your analysis strictly on the provided data and context.
+**Your Tasks:**
+1.  **Synthesize:** Review ALL provided input data.
+2.  **Analyze:** Perform a thorough analysis addressing the User Query. 
+    - Incorporate insights from the **Collected Data** (including any errors).
+    - Use the **Retrieved Context** for background.
+    - **Crucially, interpret the Time Series Context:** Analyze the calculated trends (e.g., significant price increases/decreases, TVL growth/decline) over the provided period (~7 days). Note any errors reported during time-series retrieval.
+    - Consider the **User Profile** (risk tolerance, goals) when evaluating findings.
+3.  **Evaluate Sufficiency:** Determine if the combined information is SUFFICIENT to comprehensively answer the User Query.
+4.  **Provide Reasoning:** Briefly explain WHY the data is sufficient or insufficient.
+5.  **Suggest Next Steps (If Insufficient):** If insufficient, suggest specific next steps or information needed.
 
-**User Query:**
-{user_query}
+**Output Format:**
+You MUST respond with a single JSON object matching the following structure. Do NOT include any other text before or after the JSON.
 
-**User Profile (Passed In):**
-{user_profile}
-
-**Retrieved Context from Knowledge Base:**
-{retrieved_context}
-
-**Time Series Context:**
-{time_series_context}
-
-**Newly Collected Data:**
-{collected_data}
-
-**Analysis:**
+```json
+{{
+    "is_sufficient": boolean,
+    "analysis_text": "<Your detailed analysis synthesizing all data, including time-series trends...>",
+    "reasoning": "<Brief explanation of why data is/isn't sufficient...>",
+    "suggestions_for_next_steps": "<Specific suggestions if insufficient, otherwise null>"
+}}
+```
 """
 
 
@@ -199,20 +195,23 @@ You will be given:
 # Replanner Prompt (Corrected and Completed)
 REPLANNER_PROMPT = """You are a replanner agent tasked with analyzing the execution of a DeFi research plan and adjusting it if necessary.
 
-Your goal is to determine if the original query has been fully answered by the steps taken so far, or if more steps are needed.
+Your goal is to determine if the original query has been fully answered by the steps taken so far, or if more steps are needed based on execution history or analysis feedback.
 
 **Input Information:**
 - **Original Query:** The user's initial request ({input})
 - **Current Plan:** The remaining steps planned ({plan})
 - **Execution History:** The steps already executed and their results ({intermediate_steps})
+- **Analysis Context:** Feedback from the analysis step regarding data sufficiency ({analysis_context})
 
 **Your Task:**
-1.  **Analyze History:** Review the `intermediate_steps`. Does the collected information and analysis fully address the `input` query?
+1.  **Analyze History & Analysis Context:** Review the `intermediate_steps` and `analysis_context`. 
+    - Did critical errors occur during execution?
+    - Did the analysis indicate the data was insufficient? If so, consider the `analysis_context` for suggestions.
 2.  **Check Plan:** Review the `plan`. Are there remaining steps?
 3.  **Decide:**
-    a.  **If the query IS fully answered:** Respond with the final answer based on the history.
-    b.  **If the query is NOT fully answered AND there are remaining steps in the plan:** Allow the current plan to continue.
-    c.  **If the query is NOT fully answered AND the plan is empty OR the history indicates the current plan is insufficient/wrong:** Generate a *new*, corrected plan to address the query based on the available information.
+    a.  **If the query IS fully answered (based on history):** Respond with the final answer.
+    b.  **If the query is NOT fully answered BUT the analysis was sufficient AND the plan has remaining steps:** Allow the current plan to continue.
+    c.  **If the query is NOT fully answered AND (critical errors occurred OR analysis was insufficient OR the plan is empty):** Generate a *new*, corrected plan. Use the `analysis_context` suggestions and execution history to inform the new plan.
 
 **Output Format:**
 You MUST respond with a JSON object containing EITHER `final_answer` OR a new `plan`, but not both.
@@ -238,8 +237,8 @@ You MUST respond with a JSON object containing EITHER `final_answer` OR a new `p
         }}
     }}
     ```
-    *   If the existing plan is fine, return the *remaining* steps from the input `plan` here.
-    *   If replanning is needed, generate *new* steps here.
+    *   If continuing the existing plan, return the *remaining* steps from the input `plan` here.
+    *   If replanning is needed, generate *new* steps here based on history and analysis context.
 
 **Example (Answer Found):**
 Input Query: What is the TVL of Aave?
