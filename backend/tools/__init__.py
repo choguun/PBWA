@@ -206,7 +206,36 @@ time_series_retriever_tool = Tool(
 async def vfat_scraper_tool(farm_url: str) -> str:
     """(Async) Scrapes farm data (APY, pools) from a specific vfat.tools URL. Results are experimental.
     Use the full URL of the specific farm page (e.g., https://vfat.tools/polygon/quickswap-epoch/)."""
-    return await scrape_vfat_farm(farm_url=farm_url)
+    # Call the implementation function which might return dict, list, or str(error json)
+    result = await scrape_vfat_farm(farm_url=farm_url)
+    
+    # Handle different return types from scrape_vfat_farm and ensure final return is JSON string
+    if isinstance(result, dict): # Handles structured errors or unexpected dicts
+        # If it's an error dict from parsing failure or agent error, it's already JSON-like
+        return json.dumps(result) 
+    elif isinstance(result, list): # Handles successful scrape returning a list
+        # Convert the list of farm data into a JSON string
+        return json.dumps(result, indent=2) 
+    elif isinstance(result, str):
+        # Assume it might be a JSON string already (e.g., from initial URL error)
+        # Or potentially raw text if parsing failed and returned raw string (though we changed that)
+        # Try to return as-is, or wrap if definitely not JSON?
+        # Safest bet: assume it *could* be a raw string error, wrap it.
+        # However, the current scrape_vfat_farm aims to only return dict/list or JSON str errors.
+        # Let's trust the implementation returns JSON-compatible structures.
+        # If it's already a JSON string error from scrape_vfat_farm, this dumps it again, which is ok.
+         try:
+             # Check if it's already a valid JSON string
+             json.loads(result)
+             return result # It was already a JSON string
+         except json.JSONDecodeError:
+             # It was a raw string - wrap it as an error JSON string
+             logger.warning("vfat_scraper_tool received unexpected raw string, wrapping as error.")
+             return json.dumps({"error": "Unexpected raw string output from scraper implementation.", "raw_output": result[:1000]})
+    else:
+        # Handle any other unexpected type
+        logger.error(f"vfat_scraper_tool received unexpected type: {type(result)}")
+        return json.dumps({"error": "Unexpected return type from vfat scraper implementation.", "raw": str(result)[:500]})
 
 # --- send_ethereum tool --- 
 # Implementation remains here as it uses local wallet instance

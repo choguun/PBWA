@@ -46,18 +46,38 @@ async def scrape_vfat_farm(farm_url: str) -> str:
         if history.has_errors():
             errors = history.errors()
             logger.error(f"browser-use Agent encountered errors scraping {farm_url}: {errors}")
+            # Return error as JSON string consistent with other potential returns
             return json.dumps({"error": f"Error during scraping with browser-use: {errors}"}) 
             
-        final_result = history.final_result()
+        final_result_str = history.final_result()
         
-        if not final_result:
+        if not final_result_str:
              logger.warning(f"browser-use Agent finished for {farm_url} but returned no final result.")
              return json.dumps({"error": "browser-use agent did not return structured data. Page might have changed or task failed."})
 
-        logger.info(f"Attempted vfat.tools scrape for {farm_url}. Result length: {len(final_result)}")
-        # Assume the agent returns a JSON string based on the prompt
-        # We return it directly, expecting it to be a JSON list or an error JSON
-        return str(final_result) 
+        logger.info(f"Attempted vfat.tools scrape for {farm_url}. Raw result length: {len(final_result_str)}")
+        
+        # Attempt to parse the result as JSON
+        try:
+            parsed_result = json.loads(final_result_str)
+            # Optional: Validate if it's a list as requested in the prompt
+            # if not isinstance(parsed_result, list):
+            #     logger.warning(f"vfat scraper result was valid JSON but not a list: {type(parsed_result)}")
+            #     return json.dumps({"error": "Scraper returned unexpected data format (not a list)."})
+            
+            logger.info("Successfully parsed vfat scrape result as JSON.")
+            # Return the already parsed result (likely a list of dicts)
+            # We need the wrapper tool in __init__.py to handle converting this back to string if needed
+            return parsed_result 
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse vfat scraper result as JSON. Raw result:\n{final_result_str[:500]}...")
+            # Return the raw string but wrap it in an error structure might be better?
+            # For now, return an explicit error dictionary
+            return {"error": "Failed to parse scraper output as JSON.", "raw_output": final_result_str[:1000]} # Include snippet of raw output
+        except Exception as e:
+            # Catch potential errors if result isn't a string? Unlikely but safe.
+             logger.exception(f"Unexpected error processing final_result from vfat scrape: {e}")
+             return {"error": f"Unexpected error processing vfat scrape result: {e}"}
 
     except ImportError:
         logger.critical("ImportError: `browser-use` library not found. Please install it: pip install browser-use")
