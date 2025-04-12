@@ -47,7 +47,14 @@ You have access to the following tools. **Only use these tools**:
     - Example Usage:
         - `Use twitter_api_tool query='(from:VitalikButerin) OR (#ethereum)' max_results=20`
 
-6.  **`send_ethereum`**: 
+6.  **`onchain_tx_history_tool`**: 
+    - Description: Fetches the recent transaction history (latest 50 txs) for a given blockchain address from the RSK Testnet Explorer API.
+    - Arguments:
+        - `address` (string, required): The blockchain address (e.g., 0x...). 
+    - Example Usage:
+        - `Use onchain_tx_history_tool address='0x123...abc'`
+
+7.  **`send_ethereum`**: 
     - Description: Sends a specified amount of ETH from the user's configured wallet to a given address. **Use with extreme caution. Always confirm with the user or context if the intent is clear.**
     - Arguments: 
         - `to_address` (string, required): The recipient Ethereum address.

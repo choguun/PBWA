@@ -4,12 +4,13 @@ from web3 import Web3
 from ..wallet import EVMWallet # Adjusted relative import
 # Remove Playwright import
 # from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError 
-from ..schemas import SendEthInput, ScrapeWebsiteInput, DefiLlamaInput, CoinGeckoInput, TwitterInput # Import TwitterInput
+from ..schemas import SendEthInput, ScrapeWebsiteInput, DefiLlamaInput, CoinGeckoInput, TwitterInput, OnChainTxHistoryInput # Import TwitterInput and OnChain schema
 # Import implementation functions from sibling modules
 from .web_scraper import scrape_website_content 
 from .defi_llama import call_defi_llama_api
 from .coingecko import call_coingecko_api # Import CoinGecko function
 from .twitter import search_recent_tweets # Import Twitter function
+from .onchain import get_address_transaction_history # Import onchain function
 import json
 import asyncio # Import asyncio
 from typing import Optional
@@ -146,6 +147,24 @@ twitter_api_tool = Tool(
     args_schema=TwitterInput
 )
 
+# --- On-Chain Transaction History Tool ---
+def run_onchain_tx_history_tool(address: str) -> str:
+    """Wrapper to call the on-chain transaction history API."""
+    logger.info(f"OnChain Tx History Tool called for address: {address}")
+    try:
+        result_dict = get_address_transaction_history(address=address)
+        return json.dumps(result_dict, indent=2)
+    except Exception as e:
+        logger.error(f"Unexpected error running OnChain Tx History tool wrapper: {e}", exc_info=True)
+        return f"Unexpected error processing OnChain Tx History request: {e}"
+
+onchain_tx_history_tool = Tool(
+    name="onchain_tx_history_tool",
+    func=run_onchain_tx_history_tool,
+    description="Fetches the recent transaction history for a given blockchain address from the RSK Testnet Explorer API.",
+    args_schema=OnChainTxHistoryInput
+)
+
 # --- send_ethereum tool --- 
 # Implementation remains here as it uses local wallet instance
 @tool(args_schema=SendEthInput)
@@ -188,6 +207,7 @@ agent_tools = [
     defi_llama_api_tool,  # Sync wrapper
     coingecko_api_tool,   # Add CoinGecko tool
     twitter_api_tool,     # Add Twitter tool
+    onchain_tx_history_tool, # Add On-chain tool
     send_ethereum,        # Async tool
     scrape_tool_direct    # Async tool (potentially redundant with web_scraper wrapper)
 ] 

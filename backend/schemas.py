@@ -65,13 +65,12 @@ class TwitterInput(BaseModel):
     query: str = Field(..., description="The search query for finding recent tweets. Use standard Twitter search operators.")
     max_results: int = Field(10, description="Maximum number of tweets to return (between 10 and 100).", ge=10, le=100)
 
+class OnChainTxHistoryInput(BaseModel):
+    address: str = Field(..., description="The blockchain address (e.g., 0x...) for which to fetch transaction history.")
+    # Optional: Add startblock, endblock, page, offset, sort later if needed
+
 # --- Request/Response Schemas ---
 # Remove unused QueryRequest and QueryResponse
-# class QueryRequest(BaseModel):
-#     pass
-# 
-# class QueryResponse(BaseModel):
-#     response: str
 
 class UserProfilePayload(BaseModel):
     """ Defines the structure for the /invoke endpoint request body. """
