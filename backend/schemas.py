@@ -45,7 +45,7 @@ class TimeSeriesInput(BaseModel):
     limit: int = Field(100, description="Maximum number of data points to return.")
 
 class VfatInput(BaseModel):
-    farm_url: str = Field(..., description="The specific URL of the vfat.tools farm page to scrape.")
+    farm_url: str = Field(..., description="The specific URL of the vfat.io farm page to scrape.")
 
 # --- New Schema for Document Parsing Tool ---
 class DocumentParseInput(BaseModel):

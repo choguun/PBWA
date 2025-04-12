@@ -12,15 +12,15 @@ async def scrape_vfat_farm(
     user_query: Optional[str] = None,
     user_profile: Optional[Dict[str, Any]] = None
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
-    """Attempts to scrape farm data (APY, pools) from a vfat.tools URL using browser_use.Agent,
+    """Attempts to scrape farm data (APY, pools) from a vfat.io URL using browser_use.Agent,
     considering user query and profile for context."""
 
-    logger.info(f"Attempting to scrape vfat.tools farm: {farm_url}")
+    logger.info(f"Attempting to scrape vfat.io farm: {farm_url}")
     logger.info(f"User Query Context: {user_query}")
     logger.info(f"User Profile Context: {user_profile}")
 
-    if not farm_url or not farm_url.startswith("https://vfat.tools/"):
-        return {"error": "Invalid vfat.tools URL provided."} 
+    if not farm_url or not farm_url.startswith("https://vfat.io/"):
+        return {"error": "Invalid vfat.io URL provided."} 
 
     # Format profile for prompt
     profile_context = "Not provided."
@@ -73,7 +73,7 @@ async def scrape_vfat_farm(
         If the page fails to load or no farm data tables are found, return an error message in JSON format: {{"error": "Could not find farm data tables."}}
         """
 
-        logger.debug(f"Initializing browser-use Agent for vfat.tools with updated task...")
+        logger.debug(f"Initializing browser-use Agent for vfat.io with updated task...")
         agent = Agent(task=task, llm=llm)
 
         logger.debug(f"Running browser-use Agent for vfat URL: {farm_url}")
@@ -90,7 +90,7 @@ async def scrape_vfat_farm(
              logger.warning(f"browser-use Agent finished for {farm_url} but returned no final result.")
              return {"error": "browser-use agent did not return structured data."} 
 
-        logger.info(f"Attempted vfat.tools scrape for {farm_url}. Raw result length: {len(final_result_str)}")
+        logger.info(f"Attempted vfat.io scrape for {farm_url}. Raw result length: {len(final_result_str)}")
         
         # Attempt to parse the result as JSON (expecting a list)
         try:
@@ -129,7 +129,7 @@ if __name__ == '__main__':
     async def run_test():
         print("--- Testing vfat.tools Scraper Tool --- ")
         # Replace with a valid, current vfat.tools URL for testing
-        test_url = "https://vfat.tools/polygon/quickswap-epoch/" # Example - URL might change!
+        test_url = "https://vfat.io/yield" # Example - URL might change!
         print(f"\nAttempting scrape for: {test_url}")
         result_str = await scrape_vfat_farm(test_url)
         print("\nResult:")

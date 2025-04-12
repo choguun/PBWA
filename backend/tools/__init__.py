@@ -173,19 +173,13 @@ time_series_retriever_tool = Tool(
     args_schema=TimeSeriesInput
 )
 
-# --- vfat.tools Scraper Tool (Refactored to explicit Tool definition) ---
-# Remove the old @tool decorated function:
-# @tool
-# async def vfat_scraper_tool(farm_url: str) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
-#    ... (old implementation removed) ...
-
 # Define the Tool object explicitly, pointing to the imported implementation
 vfat_scraper_tool = Tool(
     name="vfat_scraper_tool",
     # The actual implementation function from vfat_scraper.py
     # This function DOES accept user_query and user_profile (as optional)
     func=scrape_vfat_farm, 
-    description="(Async) Scrapes farm data (APY, pools) from a specific vfat.tools URL using browser automation. Provide the full URL of the specific farm page. Requires context (user_query, user_profile) to be injected by the agent.",
+    description="(Async) Scrapes farm data (APY, pools) from a specific vfat.io URL using browser automation. Provide the full URL of the specific farm page. Requires context (user_query, user_profile) to be injected by the agent.",
     args_schema=VfatInput, # Schema should only contain farm_url, as context is injected
     coroutine=scrape_vfat_farm # Explicitly provide the coroutine
 )

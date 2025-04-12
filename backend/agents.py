@@ -1056,54 +1056,64 @@ class ResearchPipeline:
                             sse_event_type = "plan"
                             sse_data = {"type": "plan", "steps": plan}
                         elif node_name == "collect_data":
-                            # --- Add logic to potentially send a custom search_scrape_start event ---
+                            # --- Extract tool name and potentially relevant args (like file_path) ---
                             tool_name = "unknown_tool"
                             task_string = ""
-                            search_query = None
+                            args_dict = {} # Store extracted args like file_path
                             collected_data_list = node_output.get("collected_data")
                             if collected_data_list:
                                 try:
                                     last_task_tuple = collected_data_list[-1]
-                                    task_string = last_task_tuple[0] # Get the task string: e.g., "1. Use scrape_tool_direct url='https://google.com/search?q=...'"
+                                    task_string = last_task_tuple[0] # Get the task string
                                     parts = task_string.split()
-                                    if len(parts) >= 2 and parts[1] == 'scrape_tool_direct':
-                                        tool_name = 'scrape_tool_direct'
-                                        # Extract URL to check if it's Google search
-                                        url_match = re.search(r'url=[\'"]?([^\'"\\s]+)[\'"]?', task_string)
-                                        if url_match:
-                                            url = url_match.group(1)
-                                            parsed_url = urlparse(url)
-                                            if "google.com" in parsed_url.netloc and parsed_url.path.startswith("/search"):
-                                                query_params = parse_qs(parsed_url.query)
-                                                if 'q' in query_params and query_params['q']:
-                                                    search_query = query_params['q'][0]
-                                                    # Yield the specific start event
-                                                    search_start_data = {"type": "search_scrape_start", "query": search_query}
-                                                    yield f"event: search_scrape_start\ndata: {json.dumps(search_start_data)}\n\n"
-                                                    logger.info(f"Sent search_scrape_start event for query: {search_query}")
-                                    elif len(parts) >= 2: # Handle extraction for other tools if needed, simplified here
-                                        tool_name = parts[1]
-
-                                # Ensure the exception tuple is correctly closed
+                                    if len(parts) >= 2:
+                                        tool_name = parts[1] 
+                                        # Basic arg parsing for display purposes (can be refined)
+                                        arg_matches = re.findall(r'(\w+)=[\"]?([^\"\s]+)[\"]?', task_string)
+                                        for key, value in arg_matches:
+                                            args_dict[key] = value
+                                
                                 except (IndexError, TypeError, AttributeError) as e:
-                                     logger.warning(f"Could not parse tool/URL from task in collected_data: {e}")
+                                     logger.warning(f"Could not parse tool/args from task in collected_data: {e}")
 
-                            # --- Prepare standard tool_result event (runs after the custom one if applicable) --- 
+                            # --- Prepare tool_result display, customizing for document_parser ---
                             current_output = node_output.get("current_step_output")
-                            result_display = current_output
-                            # Simplified preview logic...
-                            if isinstance(current_output, dict) and "error" not in current_output:
-                                 result_display = f"Dict with keys: {list(current_output.keys())}" # Less verbose preview
-                            elif isinstance(current_output, str) and len(current_output) > 200:
-                                 result_display = current_output[:200] + "..."
-                            elif not isinstance(current_output, (str, dict, list, tuple, int, float, bool, type(None))): # Handle other complex types
-                                 result_display = f"<{type(current_output).__name__}> object"
+                            result_display = "Processing..." # Default
 
+                            if tool_name == "document_parser":
+                                file_path_display = args_dict.get('file_path', 'unknown file')
+                                try:
+                                    # Output from document_parser is expected to be a JSON string
+                                    parsed_output = json.loads(current_output)
+                                    if isinstance(parsed_output, list):
+                                        result_display = f"Parsed document '{file_path_display}': Found {len(parsed_output)} pages."
+                                    elif isinstance(parsed_output, dict) and 'error' in parsed_output:
+                                         result_display = f"Error parsing document '{file_path_display}': {parsed_output['error']}"
+                                    else:
+                                         result_display = f"Processed document '{file_path_display}'. Unexpected result format."
+                                         logger.warning(f"Document parser returned unexpected format: {type(parsed_output)}")
+                                except (json.JSONDecodeError, TypeError):
+                                    logger.warning(f"Document parser output was not valid JSON: {str(current_output)[:200]}...")
+                                    result_display = f"Processed document '{file_path_display}'. Output not valid JSON."
+                                except Exception as e:
+                                    logger.error(f"Error processing document parser output: {e}")
+                                    result_display = f"Error processing result for document '{file_path_display}'."
+                            else:
+                                # Fallback to existing preview logic for other tools
+                                result_display = current_output
+                                if isinstance(current_output, dict) and "error" not in current_output:
+                                     result_display = f"Dict with keys: {list(current_output.keys())}" 
+                                elif isinstance(current_output, str) and len(current_output) > 200:
+                                     result_display = current_output[:200] + "..."
+                                elif not isinstance(current_output, (str, dict, list, tuple, int, float, bool, type(None))): 
+                                     result_display = f"<{type(current_output).__name__}> object"
+
+                            # --- Assign to SSE data --- 
                             sse_event_type = "tool_result"
                             sse_data = {
                                 "type": "tool_result", 
                                 "tool_name": tool_name, # Use tool_name extracted above
-                                "result": result_display
+                                "result": result_display # Use the customized or default preview
                             } 
                         elif node_name == "replan_step":
                             new_plan = node_output.get("research_plan")

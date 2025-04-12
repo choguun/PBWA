@@ -33,12 +33,14 @@ Use specific tools like `defi_llama_api_tool` or `coingecko_api_tool` *first* if
         - `Use coingecko_api_tool token_id='ethereum'`
         - `Use coingecko_api_tool contract_address='0xa0b...eb48' asset_platform_id='ethereum'`
 
-3.  **`vfat_scraper_tool`**: 
-    - Description: (Experimental) Scrapes farm data (APY, pools) from a specific vfat.tools farm page URL. Prone to breaking if website structure changes.
+3.  **`vfat_scraper_tool`**:
+    - ** ALWAYS USE THIS TOOL AFTER USEING `defi_llama_api_tool` and `coingecko_api_tool` **
+    - ** IMPORTANT: Only use this tool once for each query.**
+    - Description: (Experimental) Scrapes farm data (APY, pools) from a specific vfat.io farm page URL. Prone to breaking if website structure changes.
     - Arguments:
-        - `farm_url` (string, required): The full URL of the specific vfat.tools farm page (e.g., `https://vfat.tools/polygon/quickswap-epoch/`).
+        - `farm_url` (string, required): The full URL of the specific vfat.io farm page (e.g., `https://vfat.io/yield/`).
     - Example Usage:
-        - `Use vfat_scraper_tool farm_url='https://vfat.tools/polygon/quickswap-epoch/'`
+        - `Use vfat_scraper_tool farm_url='https://vfat.io/yield/'`
 
 4.  **`scrape_tool_direct`**: 
     - ** IMPORTANT: Only use this tool once for each query.**
@@ -186,7 +188,11 @@ Your goal is to determine if the original query has been fully answered by the s
 3.  **Decide:**
     a.  **If the query IS fully answered (based on history):** Respond with the final answer.
     b.  **If the query is NOT fully answered BUT the analysis was sufficient AND the plan has remaining steps:** Allow the current plan to continue.
-    c.  **If the query is NOT fully answered AND (critical errors occurred OR analysis was insufficient OR the plan is empty):** Generate a *new*, corrected plan. Use the `analysis_context` suggestions and execution history to inform the new plan.
+    c.  **If the query is NOT fully answered AND (critical errors occurred OR analysis was insufficient OR the plan is empty):** Generate a *new*, corrected plan. 
+        - Use the `analysis_context` suggestions and execution history to inform the new plan.
+        - **CRITICAL:** Each step in the new plan MUST follow the format `Use tool_name argument_name='value'`.
+        - **CRITICAL:** Only use valid `argument_name`s defined for the specific `tool_name` you are calling.
+        - **CRITICAL:** Do NOT include descriptive text within the arguments, only the required parameter values.
 
 **Handling Persistent Failures:**
 - **Monitor History:** Look for patterns in `intermediate_steps` and `analysis_context`. If the *same* critical data source (e.g., a specific tool like `defi_llama_api_tool protocol_slug='curve-finance'`, or scraping for specific strategy types) has failed multiple times (e.g., 2-3 consecutive replans triggered by this specific failure), assume it's persistently unavailable.
