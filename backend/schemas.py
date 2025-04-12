@@ -1,18 +1,13 @@
-from pydantic import BaseModel
-from typing import List, Annotated, Tuple, Optional
+from pydantic import BaseModel, Field
+from typing import List, Tuple, Optional, Annotated
 import operator
 from typing_extensions import TypedDict
-from pydantic import Field
 
 class QueryRequest(BaseModel):
     query: str
 
 class QueryResponse(BaseModel):
     response: str
-
-class Plan(BaseModel):
-    """Plan to follow."""
-    steps: List[str] = Field(description="Steps to follow, in order.")
 
 class PlanExecute(TypedDict):
     input: str
@@ -21,14 +16,14 @@ class PlanExecute(TypedDict):
     response: Optional[str]
     intermediate_responses: List[str]
 
-class Response(BaseModel):
-    """Response to user."""
-    response: str
+class Plan(BaseModel):
+    """Plan to follow."""
+    steps: List[str] = Field(description="Steps to follow, in order.")
 
-class Act(BaseModel):
-    """Action to perform (for replanning)."""
-    response: Optional[Response] = None
-    plan: Optional[Plan] = None
+class ReplannerOutput(BaseModel):
+    """Output structure for the Replanner LLM call."""
+    final_answer: Optional[str] = Field(default=None, description="The final answer to the user's query, if determined.")
+    plan: Optional[Plan] = Field(default=None, description="A new plan with next steps, if further action is needed.")
 
 class SendEthInput(BaseModel):
     to_address: str = Field(description="The recipient Ethereum address.")
