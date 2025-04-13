@@ -276,10 +276,13 @@ const ChatStream: React.FC<ChatStreamProps> = ({ apiEndpoint, payload, onStreamE
       case 'tool_result':
         return (
           <div>
-            <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
-                Tool: {msg.tool_name || 'Unknown'}
+            <Typography variant="subtitle2" sx={{ mb: 0.5, fontWeight: 'bold' }}> 
+              Tool: {msg.tool_name || 'Unknown'}
             </Typography>
-            <Typography variant="body2" component="pre" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', bgcolor: '#f5f5f5', p: 1, borderRadius: 1 }}>
+            <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
+              Tool Result:
+            </Typography>
+            <Typography variant="body2" component="pre" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', bgcolor: '#f5f5f5', p: 1, borderRadius: 1, mt: 0.5 }}>
               {typeof msg.result === 'object' ? JSON.stringify(msg.result, null, 2) : String(msg.result)}
             </Typography>
           </div>
