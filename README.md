@@ -1,4 +1,4 @@
-# DeFi Deep Research Agent (PBWA)
+# DeFi Deep Research Agent
 
 **Tagline:** AI-Powered Deep DeFi Research & Strategy.
 
