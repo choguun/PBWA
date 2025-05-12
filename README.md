@@ -25,6 +25,7 @@ The DeFi Deep Research Agent acts as an intelligent assistant by:
 *   **Personalization:** Incorporates user profiles (risk tolerance, preferred chains) into planning and analysis for relevant results.
 *   **Enhanced Safety Awareness:** Can be directed to search for audits and considers user risk profiles.
 *   **Efficiency:** Significantly reduces the manual effort needed for DeFi research.
+*   **-Multi-agent system:** Planner, Replanner, Analyzer, and Strategist agent.
 
 ## Features
 
