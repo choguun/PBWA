@@ -44,7 +44,7 @@ The DeFi Deep Research Agent acts as an intelligent assistant by:
 *   **Time-Series Database:** Stores time-series data (prices, TVL - *if populated*) in InfluxDB.
 *   **Streaming API:** FastAPI backend streams agent progress and results to the frontend via Server-Sent Events (SSE).
 *   **Interactive Frontend:** React frontend displays the agent's progress, plan, tool results, analysis, and allows for interaction (e.g., resuming paused flows).
-*   **Rootstock Integration:** Configured wallet interaction via `goat-sdk` allows for transactions on the Rootstock network (Testnet configured).
+*   **Soneium Integration:** Configured wallet interaction via `goat-sdk` allows for transactions on the Rootstock network (Testnet configured).
 
 ## Architecture
 
